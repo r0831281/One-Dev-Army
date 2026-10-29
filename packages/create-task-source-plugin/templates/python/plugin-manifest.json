@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "1.0",
+  "id": "community.__PLUGIN_ID__",
+  "version": "0.1.0",
+  "protocolRange": "^1.0.0",
+  "displayName": "__PLUGIN_ID__ task source",
+  "runtime": "stdio-container",
+  "image": "registry.invalid/__PLUGIN_ID__@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "capabilities": ["task:read"],
+  "httpOrigins": ["https://api.example.invalid"],
+  "configSchemaRef": "plugin://community.__PLUGIN_ID__/config/1",
+  "writeReconciliation": "marker-search"
+}

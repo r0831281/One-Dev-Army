@@ -1,0 +1,6 @@
+node_modules
+.validation
+.test-tmp
+artifacts
+.git
+*.tsbuildinfo

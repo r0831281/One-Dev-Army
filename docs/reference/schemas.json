@@ -1,0 +1,278 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oda.example/schemas/1.0/reference.json",
+  "title": "O-D-A reference contracts",
+  "$defs": {
+    "UUID": {"type": "string", "format": "uuid"},
+    "Timestamp": {"type": "string", "format": "date-time"},
+    "Cursor": {"type": "string", "pattern": "^(0|[1-9][0-9]*)$"},
+    "RepositoryTarget": {
+      "type": "object", "additionalProperties": false, "required": ["id", "baseSha"],
+      "properties": {"id": {"$ref": "#/$defs/UUID"}, "baseSha": {"type": "string", "pattern": "^[a-f0-9]{40}([a-f0-9]{24})?$"}}
+    },
+    "Constraint": {
+      "type": "object", "additionalProperties": false, "required": ["id", "text", "origin", "sourceRef"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 200},
+        "text": {"type": "string", "minLength": 1, "maxLength": 8000},
+        "origin": {"enum": ["policy", "task", "human-feedback", "accepted-assumption"]},
+        "sourceRef": {"type": "string", "minLength": 1, "maxLength": 2048}
+      }
+    },
+    "TaskContext": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "taskId", "revision", "source", "repository", "title", "description", "acceptanceCriteria", "attachments", "labels", "requester", "constraints", "provenance"],
+      "properties": {
+        "schemaVersion": {"const": "1.0"}, "taskId": {"$ref": "#/$defs/UUID"}, "revision": {"type": "integer", "minimum": 1},
+        "source": {
+          "type": "object", "additionalProperties": false, "required": ["instanceId", "externalId", "key", "url", "revision"],
+          "properties": {
+            "instanceId": {"$ref": "#/$defs/UUID"}, "externalId": {"type": "string", "minLength": 1, "maxLength": 500},
+            "key": {"type": "string", "minLength": 1, "maxLength": 2048}, "url": {"type": "string", "format": "uri", "maxLength": 4096},
+            "revision": {"type": ["string", "null"], "maxLength": 500}
+          }
+        },
+        "repository": {"$ref": "#/$defs/RepositoryTarget"},
+        "title": {"type": "string", "minLength": 1, "maxLength": 500},
+        "description": {"type": "string", "maxLength": 200000},
+        "acceptanceCriteria": {"type": "array", "maxItems": 100, "items": {"type": "string", "minLength": 1, "maxLength": 8000}},
+        "attachments": {
+          "type": "array", "maxItems": 100,
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["id", "name", "url", "mediaType", "sizeBytes"],
+            "properties": {
+              "id": {"type": "string", "minLength": 1}, "name": {"type": "string", "minLength": 1, "maxLength": 500},
+              "url": {"type": "string", "format": "uri"}, "mediaType": {"type": ["string", "null"]},
+              "sizeBytes": {"type": ["integer", "null"], "minimum": 0}
+            }
+          }
+        },
+        "labels": {"type": "array", "maxItems": 100, "uniqueItems": true, "items": {"type": "string", "maxLength": 200}},
+        "requester": {
+          "anyOf": [
+            {"type": "null"},
+            {"type": "object", "additionalProperties": false, "required": ["id", "displayName"], "properties": {"id": {"type": "string"}, "displayName": {"type": "string", "maxLength": 500}}}
+          ]
+        },
+        "constraints": {"type": "array", "maxItems": 200, "items": {"$ref": "#/$defs/Constraint"}},
+        "provenance": {
+          "type": "object", "additionalProperties": false, "required": ["fetchedAt", "pluginId", "pluginVersion", "payloadArtifactId"],
+          "properties": {
+            "fetchedAt": {"$ref": "#/$defs/Timestamp"}, "pluginId": {"type": "string", "minLength": 1},
+            "pluginVersion": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+            "payloadArtifactId": {"anyOf": [{"$ref": "#/$defs/UUID"}, {"type": "null"}]}
+          }
+        },
+        "extensions": {"type": "object", "propertyNames": {"pattern": "^[a-z0-9-]+\\.[a-z0-9.-]+$"}}
+      }
+    },
+    "AgentProfile": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "id", "name", "revision", "role", "provider", "model", "credentialRef", "providerOptions", "limits", "tools", "prompt", "outputSchemaRef", "retryPolicy", "fallbackProfileIds"],
+      "properties": {
+        "schemaVersion": {"const": "1.0"}, "id": {"$ref": "#/$defs/UUID"},
+        "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,79}$"}, "revision": {"type": "integer", "minimum": 1},
+        "role": {"enum": ["context-reviewer", "planner", "implementer", "tester", "reviewer", "reporter", "setup"]},
+        "provider": {"enum": ["openai", "anthropic", "ollama", "openrouter", "gemini", "bedrock"]},
+        "model": {"type": "string", "minLength": 1, "maxLength": 200},
+        "credentialRef": {"type": ["string", "null"], "pattern": "^vault://[A-Za-z0-9/_-]+$"},
+        "providerOptions": {
+          "type": "object", "additionalProperties": false, "required": ["temperature", "reasoningEffort"],
+          "properties": {"temperature": {"type": ["number", "null"], "minimum": 0, "maximum": 2}, "reasoningEffort": {"enum": ["minimal", "low", "medium", "high", null]}}
+        },
+        "limits": {
+          "type": "object", "additionalProperties": false, "required": ["maxInputTokens", "maxOutputTokens", "timeoutMs", "maxModelCalls"],
+          "properties": {
+            "maxInputTokens": {"type": "integer", "minimum": 1}, "maxOutputTokens": {"type": "integer", "minimum": 1},
+            "timeoutMs": {"type": "integer", "minimum": 1000, "maximum": 1800000}, "maxModelCalls": {"type": "integer", "minimum": 1, "maximum": 100}
+          }
+        },
+        "tools": {"type": "array", "uniqueItems": true, "items": {"enum": ["repo.read", "repo.search", "sandbox.read", "sandbox.write", "sandbox.exec", "test.run", "static.run"]}},
+        "prompt": {
+          "type": "object", "additionalProperties": false, "required": ["templateId", "templateRevision", "intent", "compiledArtifactId"],
+          "properties": {
+            "templateId": {"type": "string", "minLength": 1}, "templateRevision": {"type": "integer", "minimum": 1},
+            "intent": {"type": "string", "minLength": 1, "maxLength": 4000},
+            "compiledArtifactId": {"anyOf": [{"$ref": "#/$defs/UUID"}, {"type": "null"}]}
+          }
+        },
+        "outputSchemaRef": {"type": "string", "format": "uri"},
+        "retryPolicy": {
+          "type": "object", "additionalProperties": false, "required": ["transportAttempts", "structuredOutputRepairs"],
+          "properties": {"transportAttempts": {"type": "integer", "minimum": 1, "maximum": 10}, "structuredOutputRepairs": {"type": "integer", "minimum": 0, "maximum": 5}}
+        },
+        "fallbackProfileIds": {"type": "array", "maxItems": 5, "uniqueItems": true, "items": {"$ref": "#/$defs/UUID"}}
+      }
+    },
+    "GateDecisionInput": {
+      "type": "object", "additionalProperties": false,
+      "required": ["protocolVersion", "runId", "workflowId", "gateId", "expectedGateVersion", "decision", "idempotencyKey"],
+      "properties": {
+        "protocolVersion": {"const": "1.0"}, "runId": {"$ref": "#/$defs/UUID"},
+        "workflowId": {"type": "string", "minLength": 1, "maxLength": 1000}, "gateId": {"$ref": "#/$defs/UUID"},
+        "expectedGateVersion": {"type": "integer", "minimum": 1}, "decision": {"enum": ["APPROVE", "REJECT"]},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 8000, "pattern": "\\S"},
+        "idempotencyKey": {"$ref": "#/$defs/UUID"}
+      },
+      "allOf": [
+        {"if": {"properties": {"decision": {"const": "REJECT"}}}, "then": {"properties": {"reason": {}}, "required": ["reason"]}, "else": {"properties": {"reason": false}}}
+      ]
+    },
+    "DecisionReceipt": {
+      "type": "object", "additionalProperties": false, "required": ["decisionId", "status", "gateVersion", "stateRevision", "recordedAt"],
+      "properties": {
+        "decisionId": {"$ref": "#/$defs/UUID"}, "status": {"enum": ["RECORDED", "PENDING"]},
+        "gateVersion": {"type": "integer", "minimum": 1}, "stateRevision": {"type": "integer", "minimum": 0},
+        "recordedAt": {"anyOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]}
+      }
+    },
+    "RunManifest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "workflowType", "workflowVersion", "runId", "taskId", "contextRevision", "repository", "routingRevision", "policyHash", "profileRevisions", "correctionBudget", "createdAt"],
+      "properties": {
+        "schemaVersion": {"const": "1.0"}, "workflowType": {"const": "TaskRunWorkflow"},
+        "workflowVersion": {"type": "integer", "minimum": 1}, "runId": {"$ref": "#/$defs/UUID"},
+        "taskId": {"$ref": "#/$defs/UUID"}, "contextRevision": {"type": "integer", "minimum": 1},
+        "repository": {"$ref": "#/$defs/RepositoryTarget"}, "routingRevision": {"type": "integer", "minimum": 1},
+        "policyHash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "profileRevisions": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 1}},
+        "correctionBudget": {
+          "type": "object", "additionalProperties": false,
+          "required": ["humanReplans", "testRepairs", "reviewRepairs", "structuredOutputRepairs", "transportAttempts"],
+          "properties": {
+            "humanReplans": {"type": "integer", "minimum": 0, "maximum": 50},
+            "testRepairs": {"type": "integer", "minimum": 0, "maximum": 50},
+            "reviewRepairs": {"type": "integer", "minimum": 0, "maximum": 50},
+            "structuredOutputRepairs": {"type": "integer", "minimum": 0, "maximum": 10},
+            "transportAttempts": {"type": "integer", "minimum": 1, "maximum": 10}
+          }
+        },
+        "createdAt": {"$ref": "#/$defs/Timestamp"},
+        "extensions": {"type": "object", "propertyNames": {"pattern": "^[a-z0-9-]+\\.[a-z0-9.-]+$"}}
+      }
+    },
+    "RepositoryInventory": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "repositoryId", "baseSha", "files", "truncated"],
+      "properties": {
+        "schemaVersion": {"const": "1.0"}, "repositoryId": {"$ref": "#/$defs/UUID"},
+        "baseSha": {"type": "string", "pattern": "^[a-f0-9]{40}([a-f0-9]{24})?$"},
+        "files": {"type": "array", "maxItems": 10000, "items": {"type": "string", "minLength": 1, "maxLength": 4096}},
+        "truncated": {"type": "boolean"}
+      }
+    },
+    "Clarification": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "sufficient", "questions", "proposedAssumptions", "relevantPaths"],
+      "properties": {
+        "schemaVersion": {"const": "1.0"}, "sufficient": {"type": "boolean"},
+        "questions": {"type": "array", "maxItems": 50, "items": {"type": "string", "minLength": 1, "maxLength": 8000}},
+        "proposedAssumptions": {"type": "array", "maxItems": 50, "items": {"type": "string", "minLength": 1, "maxLength": 8000}},
+        "relevantPaths": {"type": "array", "maxItems": 500, "items": {"type": "string", "minLength": 1, "maxLength": 4096}}
+      }
+    },
+    "Plan": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "revision", "title", "steps", "constraints", "acceptanceMapping", "risks"],
+      "properties": {
+        "schemaVersion": {"const": "1.0"}, "revision": {"type": "integer", "minimum": 1},
+        "title": {"type": "string", "minLength": 1, "maxLength": 500},
+        "steps": {"type": "array", "minItems": 1, "maxItems": 100, "items": {
+          "type": "object", "additionalProperties": false, "required": ["id", "title", "description", "tests"],
+          "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 100}, "title": {"type": "string", "minLength": 1, "maxLength": 500}, "description": {"type": "string", "minLength": 1, "maxLength": 8000}, "tests": {"type": "array", "maxItems": 50, "items": {"type": "string", "minLength": 1, "maxLength": 1000}}}
+        }},
+        "constraints": {"type": "array", "maxItems": 200, "items": {"$ref": "#/$defs/Constraint"}},
+        "acceptanceMapping": {"type": "array", "maxItems": 100, "items": {"type": "string", "minLength": 1, "maxLength": 8000}},
+        "risks": {"type": "array", "maxItems": 100, "items": {"type": "string", "minLength": 1, "maxLength": 8000}}
+      }
+    },
+    "WorkflowProjection": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "runId", "workflowId", "state", "stateRevision", "manifestHash", "plan", "currentGate", "constraints", "budget", "cancelRequested", "updatedAt"],
+      "properties": {
+        "schemaVersion": {"const": "1.0"}, "runId": {"$ref": "#/$defs/UUID"}, "workflowId": {"type": "string", "minLength": 1},
+        "state": {"enum": ["QUEUED", "CONTEXT_REVIEW", "AWAITING_CONTEXT", "PLANNING", "AWAITING_PLAN", "IMPLEMENTING", "TESTING", "REVIEWING", "AWAITING_FINAL", "REPORTING", "REPORT_PENDING", "COMPLETED", "FAILED", "CANCELLING", "CANCELLED", "NEEDS_ATTENTION"]},
+        "stateRevision": {"type": "integer", "minimum": 0}, "manifestHash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "plan": {"anyOf": [{"$ref": "#/$defs/Plan"}, {"type": "null"}]},
+        "currentGate": {"anyOf": [{"type": "null"}, {"type": "object", "additionalProperties": false, "required": ["id", "version", "kind", "state", "artifactHash", "proposal"], "properties": {"id": {"$ref": "#/$defs/UUID"}, "version": {"type": "integer", "minimum": 1}, "kind": {"enum": ["CLARIFICATION", "PLAN_APPROVAL", "RECOVERY", "FINAL_APPROVAL"]}, "state": {"enum": ["PENDING", "DECIDED", "SUPERSEDED", "CANCELLED"]}, "artifactHash": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "proposal": {}}}]},
+        "constraints": {"type": "array", "maxItems": 200, "items": {"$ref": "#/$defs/Constraint"}},
+        "budget": {"type": "object", "additionalProperties": false, "required": ["humanReplansUsed", "humanReplansLimit"], "properties": {"humanReplansUsed": {"type": "integer", "minimum": 0}, "humanReplansLimit": {"type": "integer", "minimum": 0}}},
+        "cancelRequested": {"type": "boolean"}, "updatedAt": {"$ref": "#/$defs/Timestamp"}
+      }
+    },
+    "StepProjection": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "stepId", "runId", "stepKey", "iteration", "state", "stateRevision", "detail"],
+      "properties": {
+        "schemaVersion": {"const": "1.0"}, "stepId": {"$ref": "#/$defs/UUID"}, "runId": {"$ref": "#/$defs/UUID"},
+        "stepKey": {"type": "string", "minLength": 1, "maxLength": 100}, "iteration": {"type": "integer", "minimum": 1},
+        "state": {"enum": ["PENDING", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"]},
+        "stateRevision": {"type": "integer", "minimum": 0}, "detail": {}
+      }
+    },
+    "EventEnvelope": {
+      "type": "object", "additionalProperties": false, "required": ["protocolVersion", "cursor", "type", "occurredAt", "runId", "stateRevision", "payload"],
+      "properties": {
+        "protocolVersion": {"const": "1.0"}, "cursor": {"$ref": "#/$defs/Cursor"}, "type": {"type": "string", "minLength": 1, "maxLength": 100},
+        "occurredAt": {"$ref": "#/$defs/Timestamp"}, "runId": {"anyOf": [{"$ref": "#/$defs/UUID"}, {"type": "null"}]},
+        "stateRevision": {"type": ["integer", "null"], "minimum": 0}, "payload": {},
+        "resync": {
+          "type": "object", "additionalProperties": false, "required": ["reason", "snapshotUrl", "journalEpoch"],
+          "properties": {"reason": {"enum": ["RETENTION_GAP", "EPOCH_CHANGED"]}, "snapshotUrl": {"const": "/api/v1/snapshot"}, "journalEpoch": {"$ref": "#/$defs/UUID"}}
+        }
+      }
+    },
+    "TelemetryEvent": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "eventId", "sequence", "workspaceId", "runId", "stepId", "attemptId", "operationId", "occurredAt", "kind", "severity", "measurements", "attributes", "payload"],
+      "properties": {
+        "schemaVersion": {"const": "1.0"}, "eventId": {"$ref": "#/$defs/UUID"}, "sequence": {"$ref": "#/$defs/Cursor"},
+        "workspaceId": {"$ref": "#/$defs/UUID"}, "runId": {"$ref": "#/$defs/UUID"},
+        "stepId": {"anyOf": [{"$ref": "#/$defs/UUID"}, {"type": "null"}]},
+        "attemptId": {"anyOf": [{"$ref": "#/$defs/UUID"}, {"type": "null"}]}, "operationId": {"type": ["string", "null"]},
+        "occurredAt": {"$ref": "#/$defs/Timestamp"}, "kind": {"type": "string", "minLength": 1},
+        "severity": {"enum": ["DEBUG", "INFO", "WARN", "ERROR"]},
+        "measurements": {"type": "object", "additionalProperties": {"type": "number"}},
+        "attributes": {"type": "object", "additionalProperties": {"type": ["string", "number", "boolean"]}}, "payload": {}
+      }
+    },
+    "PluginManifest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "id", "version", "protocolRange", "displayName", "runtime", "image", "capabilities", "httpOrigins", "configSchemaRef", "writeReconciliation"],
+      "properties": {
+        "schemaVersion": {"const": "1.0"}, "id": {"type": "string", "pattern": "^[a-z0-9-]+\\.[a-z0-9.-]+$"},
+        "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"}, "protocolRange": {"type": "string", "minLength": 1},
+        "displayName": {"type": "string", "minLength": 1}, "runtime": {"const": "stdio-container"},
+        "image": {"type": "string", "pattern": "^[^\\s]+@sha256:[a-f0-9]{64}$"},
+        "capabilities": {"type": "array", "uniqueItems": true, "items": {"enum": ["task:read", "task:status", "task:comment"]}},
+        "httpOrigins": {"type": "array", "uniqueItems": true, "items": {"type": "string", "format": "uri"}},
+        "configSchemaRef": {"type": "string", "format": "uri"}, "writeReconciliation": {"enum": ["marker-search", "native-idempotency", "none"]}
+      }
+    },
+    "RpcRequest": {
+      "type": "object", "additionalProperties": false, "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {"jsonrpc": {"const": "2.0"}, "id": {"type": "string", "minLength": 1}, "method": {"type": "string", "pattern": "^(plugin|host)\\.[A-Za-z.]+$"}, "params": {"type": "object"}}
+    },
+    "ApiError": {
+      "type": "object", "additionalProperties": false, "required": ["error"],
+      "properties": {
+        "error": {
+          "type": "object", "additionalProperties": false, "required": ["code", "message", "retryable", "requestId"],
+          "properties": {"code": {"type": "string", "pattern": "^[A-Z_]+$"}, "message": {"type": "string"}, "retryable": {"type": "boolean"}, "requestId": {"type": "string"}, "details": {}}
+        }
+      }
+    },
+    "SetupConfig": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "workspaceId", "api", "temporal", "storage", "sandbox", "providers"],
+      "properties": {
+        "schemaVersion": {"const": "1.0"}, "workspaceId": {"$ref": "#/$defs/UUID"},
+        "api": {"type": "object", "additionalProperties": false, "required": ["host", "port"], "properties": {"host": {"const": "127.0.0.1"}, "port": {"type": "integer", "minimum": 1024, "maximum": 65535}}},
+        "temporal": {"type": "object", "additionalProperties": false, "required": ["address", "namespace"], "properties": {"address": {"type": "string"}, "namespace": {"type": "string", "minLength": 1}}},
+        "storage": {"type": "object", "additionalProperties": false, "required": ["databaseSecretRef", "artifactRoot"], "properties": {"databaseSecretRef": {"type": "string", "pattern": "^vault://"}, "artifactRoot": {"type": "string", "minLength": 1}}},
+        "sandbox": {"type": "object", "additionalProperties": false, "required": ["defaultBackend", "maxConcurrent"], "properties": {"defaultBackend": {"enum": ["docker", "e2b"]}, "maxConcurrent": {"type": "integer", "minimum": 1, "maximum": 16}}},
+        "providers": {"type": "object", "additionalProperties": false, "required": ["defaultProfile", "credentialRef"], "properties": {"defaultProfile": {"type": "string"}, "credentialRef": {"type": ["string", "null"], "pattern": "^vault://"}}}
+      }
+    }
+  }
+}

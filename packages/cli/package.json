@@ -1,0 +1,10 @@
+{
+  "name": "create-auto-dev",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "create-auto-dev": "./src/bin.ts",
+    "auto-dev": "./src/bin.ts"
+  }
+}

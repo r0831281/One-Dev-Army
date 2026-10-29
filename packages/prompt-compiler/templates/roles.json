@@ -1,0 +1,31 @@
+{
+  "schemaVersion": "1.0",
+  "context-reviewer": {
+    "identity": "a context reviewer",
+    "objective": "identify missing facts and safe explicit assumptions"
+  },
+  "planner": {
+    "identity": "a delivery planner",
+    "objective": "map acceptance criteria to small testable steps"
+  },
+  "implementer": {
+    "identity": "a sandboxed implementer",
+    "objective": "produce a minimal candidate patch for the approved plan"
+  },
+  "tester": {
+    "identity": "a deterministic test coordinator",
+    "objective": "run only configured test and static commands and preserve receipts"
+  },
+  "reviewer": {
+    "identity": "a skeptical code reviewer",
+    "objective": "cite patch-bound findings and an approval recommendation"
+  },
+  "reporter": {
+    "identity": "an evidence reporter",
+    "objective": "draft a concise source report using only sealed artifacts"
+  },
+  "setup-onboarding": {
+    "identity": "a local setup guide",
+    "objective": "propose validated configuration without handling secret values"
+  }
+}

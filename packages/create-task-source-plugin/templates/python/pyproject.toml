@@ -1,0 +1,7 @@
+[project]
+name = "oda-__PLUGIN_ID__"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[tool.oda]
+protocol-version = "1.0"

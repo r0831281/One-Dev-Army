@@ -1,0 +1,25 @@
+name: ci
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 11.25.0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check:markdown
+      - run: pnpm check:docs
+      - run: pnpm check:contracts
+      - run: pnpm check:phase2-artifacts
+      - run: pnpm check:phase3-artifacts
+      - run: pnpm check:phase4-artifacts
+      - run: pnpm typecheck
+      - run: pnpm build
+      - run: pnpm test

@@ -1,0 +1,31 @@
+{
+  "schemaVersion": "1.0",
+  "verifiedAt": "2026-10-28T09:32:08Z",
+  "status": "passed-with-opt-in-probes-unverified",
+  "passed": [
+    "strict TypeScript build and typecheck",
+    "Phase 1-3 unit and contract suites",
+    "Phase 1, Phase 2 compatible-evolution, and Phase 3 Temporal history replay",
+    "real PostgreSQL upgrade and fresh-schema migration head 5",
+    "real Temporal workflow v2 golden path with plan rejection/replan and final-gate worker restart",
+    "durable candidate, four exact-hash evidence records, one unpriced usage attempt, and reconciled fake source report",
+    "hardened Docker traversal, symlink, privilege, socket, metadata-egress, rootfs, capability, no-new-privilege, scratch, CPU, memory, and PID controls",
+    "container cleanup after success, cancellation, and expiry",
+    "Collector outage workflow completion and full Compose health recovery",
+    "Phase 2 real restart drill and legacy workflow compatibility",
+    "prompt hash stability, provider fixture normalization, budgets, telemetry gaps/epochs/backpressure/overflow, and reporter timeout reconciliation"
+  ],
+  "failedThenCorrected": [
+    "managed pnpm realpath denial; canonical commands were rerun with local-service permission",
+    "Phase 3 history was initially double-encoded; canonical SDK JSON replaced it",
+    "Phase 3 replay initially used a synthetic workflow ID; exact stable workflow identity metadata fixed Update replay",
+    "Docker was initially stopped and sandbox pipe access was denied; Docker Desktop was started and approved local-engine verification passed"
+  ],
+  "unverifiedByPolicy": [
+    "paid/live OpenAI, Anthropic, Gemini, OpenRouter, Bedrock, and Ollama generation probes",
+    "E2B remote execution and remote-data transfer",
+    "real source comment/status publication",
+    "registry publication, signatures, transparency records, push, merge, and tag"
+  ],
+  "versions": {"migrationHead":5,"workflowVersion":2,"taskQueue":"oda-task-run-v1","promptCompiler":"1.0.0","temporal":"1.28.1","temporalSdk":"1.25.0"}
+}

@@ -1,0 +1,9 @@
+{
+  "usage": {
+    "input_tokens": 100,
+    "output_tokens": 20,
+    "input_tokens_details": { "cached_tokens": 25 },
+    "output_tokens_details": { "reasoning_tokens": 5 }
+  },
+  "output": { "ok": true }
+}

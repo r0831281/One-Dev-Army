@@ -1,0 +1,139 @@
+{
+  "schemaVersion": "1.0",
+  "release": "0.4.0-phase.4",
+  "generatedAt": "2026-10-29T10:57:15.969Z",
+  "localOnly": true,
+  "publication": false,
+  "migrationHead": 7,
+  "contractSchema": "1.0",
+  "eventProtocol": "1.0",
+  "pluginProtocol": "1.0",
+  "workflowVersions": [
+    1,
+    2
+  ],
+  "workflowType": "TaskRunWorkflow",
+  "taskQueue": "oda-task-run-v1",
+  "temporal": {
+    "service": "1.28.1",
+    "sdk": "1.25.0"
+  },
+  "images": {
+    "sandboxBase": "node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914",
+    "sandboxLocalId": "sha256:b6dac1ffc3c67a6a043528a4cdbcf5ae32a449006d7157ca80cb82d23e0f8f9a",
+    "sandboxBrokerLocalId": "sha256:cba1aadfa5e21a19cdfbb2356d31d7ecacc71acd5c37e2982a3263deb59c1496",
+    "securityVerifierLocalId": "sha256:52499ed9ea933d24322f46abe385c46a7d4b19aca98c69465036aa1a8fa82600"
+  },
+  "artifacts": [
+    {
+      "path": "README.md",
+      "sha256": "62ddd01514033659938748061d3b3b11fc5d14a9ccf5d2b4ff7488e64ecfc4e6",
+      "size": 8673
+    },
+    {
+      "path": "SECURITY.md",
+      "sha256": "97765dd6bd6176d3f1755d266686a8cba1d865a91dc27b0d81642b9546088222",
+      "size": 1510
+    },
+    {
+      "path": "CONTRIBUTING.md",
+      "sha256": "3aac2ef933b426bf6848cb3725ee79fcc3d8a7ed62f5d83b30d4b5d97d709060",
+      "size": 1136
+    },
+    {
+      "path": "CODE_OF_CONDUCT.md",
+      "sha256": "0b9a17a4dbac90057a662c6069e02eb78167f6f37008f36c2ac714f40891d5c5",
+      "size": 446
+    },
+    {
+      "path": "docs/releases/phase-4.md",
+      "sha256": "3fd4cc47dd6dc9b3c10f32769f2ef37c6f0905600a17f24b12e035f2e2887e37",
+      "size": 1316
+    },
+    {
+      "path": "docs/reports/phase-4-completion.md",
+      "sha256": "e0c7d2e77fa33fd55fd848c87de89823adc7b5db78813bf1e184abc2bfa37a72",
+      "size": 6433
+    },
+    {
+      "path": "docs/reports/phase-4-dependency-license.md",
+      "sha256": "801c7fc4b1cfa95d9ced0c6fa7910ec50f7e0f3418dc41bfe5ef33c2454003c8",
+      "size": 1231
+    },
+    {
+      "path": "docs/runbooks/phase-4-recovery.md",
+      "sha256": "a26c9fc53d84708594502ef757a6ec99be480c40031c6aa076b0d9d270933d0e",
+      "size": 1647
+    },
+    {
+      "path": "apps/dashboard/index.html",
+      "sha256": "6df2e86b23933a9dc20c2707e34fd68f95cc6e73ef5f376bf76dc9cf59cf2961",
+      "size": 12542
+    },
+    {
+      "path": "apps/dashboard/assets.json",
+      "sha256": "b5c2078fc81cdc71adc1e7e6209db66a2a3fd68955f214957170c709d499b77d",
+      "size": 426
+    },
+    {
+      "path": "apps/dashboard/dashboard.js",
+      "sha256": "bf56cbd3f269c1fa27e1b9328ce6a05e993b4b861f175fbad29670c5a0e4b087",
+      "size": 57907
+    },
+    {
+      "path": "apps/dashboard/core.js",
+      "sha256": "89a11bb1043c0e941d36fb8bea658c5b3db5160f57786823d2790145a146ff52",
+      "size": 1450
+    },
+    {
+      "path": "apps/dashboard/demo.js",
+      "sha256": "321ffe32724b8d755b2d479e2a638cfabd48c04604ab8a7ca32ab8f13dae435c",
+      "size": 19296
+    },
+    {
+      "path": "apps/dashboard/particles.js",
+      "sha256": "7148294b2887f220c5ea036a2ec6df2a511c6e3f14847629434d98c7e3ed2f5e",
+      "size": 5037
+    },
+    {
+      "path": "apps/dashboard/settings.js",
+      "sha256": "f3c6dd2f2ed5b7368c4150fd54b2b26eb408f70497dfb83bebd0ff35e82668d0",
+      "size": 14729
+    },
+    {
+      "path": "apps/dashboard/telemetry.js",
+      "sha256": "109a658d094e989bb50c536bb1d9ad5392555d639686ca56f92c7d3208f30734",
+      "size": 18346
+    },
+    {
+      "path": "apps/dashboard/workspace-controls.js",
+      "sha256": "dfb4463ac9fde392f7d4b751a3d556aa91873fef104b59849b8e4fe70e772d59",
+      "size": 8931
+    },
+    {
+      "path": "apps/dashboard/styles/dashboard.css",
+      "sha256": "5e8e92921f03ca1770bd9b7f55b5a5cee5e4979e9ee09520c55aba9e28586116",
+      "size": 37743
+    },
+    {
+      "path": "packages/plugin-sdk/src/index.ts",
+      "sha256": "fd1ff73de8c9ac3ace080ae2cc49b7e7556cca35ab05cda3cf898f394cfe108f",
+      "size": 6834
+    },
+    {
+      "path": "packages/create-task-source-plugin/src/bin.ts",
+      "sha256": "1cbaac453d7bb5abe4b83a10ec43a0178bf351b1f00474bb48d90d6f1c3c2ccb",
+      "size": 1435
+    },
+    {
+      "path": "infra/phase3-release-manifest.json",
+      "sha256": "1b0e103b0883a44df24099bbfef3e66d6f9fd39c0eadeb36dbb2b10f2c43abca",
+      "size": 792
+    },
+    {
+      "path": "artifacts/phase-4/sbom.cdx.json",
+      "sha256": "83d68d30900b23a881124e84d26189465afb1624ddd2384fd7513a7f5259d26b",
+      "size": 79804
+    }
+  ]
+}

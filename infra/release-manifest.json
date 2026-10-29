@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0",
+  "release": "0.2.0-phase.2",
+  "node": "22.x",
+  "pnpm": "11.25.0",
+  "databaseMigrationHead": 4,
+  "contractSchema": "1.0",
+  "workflow": {
+    "type": "TaskRunWorkflow",
+    "version": 1,
+    "taskQueue": "oda-task-run-v1",
+    "temporalSdk": "1.25.0",
+    "replayFixtures": ["apps/worker/fixtures/initial.json", "apps/worker/fixtures/compatible-evolution.json"]
+  },
+  "images": {
+    "postgres": {
+      "reference": "postgres:17.6-alpine3.22",
+      "digest": "sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94",
+      "verified": true
+    },
+    "temporal": {
+      "reference": "temporalio/auto-setup:1.28.1",
+      "digest": "sha256:607d68caa111338d754771efb876c92dfcdae06d056e4530bb31cd0f37406e6a",
+      "verified": true
+    },
+    "otelCollector": {
+      "reference": "otel/opentelemetry-collector-contrib:0.137.0",
+      "digest": "sha256:886722fe0f37af9d1fe24d29529253ec59fbf263b3b1df4facaf221373e19d23",
+      "verified": true
+    },
+    "prometheus": {
+      "reference": "prom/prometheus:v3.7.1",
+      "digest": "sha256:ff7e389acbe064a4823212a500393d40a28a8f362e4b05cbf6742a9a3ef736b2",
+      "verified": true
+    }
+  },
+  "workerArtifact": {
+    "tag": "oda-worker:phase2",
+    "localImageId": "sha256:7e995473fc9878af36b772503c8c6f67b15d7fb3a2aff4a6602e72aaf9324388",
+    "published": false,
+    "base": "node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914",
+    "runtimeUser": "node"
+  },
+  "connectorArtifacts": {
+    "manifest": "artifacts/phase-1/connectors/manifest.json",
+    "format": "SPDX-2.3+DSSE-in-toto",
+    "publication": "local-only",
+    "verified": true
+  },
+  "note": "Service digests were verified from pulled linux/amd64 images. The worker is a local-only immutable image ID and was not pushed; re-build and record a registry digest before publication."
+}

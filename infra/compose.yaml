@@ -1,0 +1,83 @@
+name: ${ODA_COMPOSE_PROJECT:-oda-phase1}
+services:
+  postgres:
+    image: postgres:17.6-alpine3.22@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+    environment:
+      POSTGRES_USER: oda_temporal
+      POSTGRES_PASSWORD: ${ODA_TEMPORAL_DB_PASSWORD:-oda-temporal-local-only}
+      POSTGRES_DB: temporal
+      ODA_PRODUCT_DB_PASSWORD: ${ODA_PRODUCT_DB_PASSWORD:-oda-product-local-only}
+    volumes:
+      - oda-postgres:/var/lib/postgresql/data
+      - ./postgres-init.sh:/docker-entrypoint-initdb.d/10-oda.sh:ro
+    ports:
+      - "127.0.0.1:${ODA_POSTGRES_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U oda_temporal -d temporal"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+  temporal:
+    image: temporalio/auto-setup:1.28.1@sha256:607d68caa111338d754771efb876c92dfcdae06d056e4530bb31cd0f37406e6a
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: oda_temporal
+      POSTGRES_PWD: ${ODA_TEMPORAL_DB_PASSWORD:-oda-temporal-local-only}
+      POSTGRES_SEEDS: postgres
+      DYNAMIC_CONFIG_FILE_PATH: /etc/temporal/config/dynamicconfig/development-sql.yaml
+    volumes:
+      - ./temporal-dynamicconfig.yaml:/etc/temporal/config/dynamicconfig/development-sql.yaml:ro
+    ports:
+      - "127.0.0.1:${ODA_TEMPORAL_PORT:-7233}:7233"
+    healthcheck:
+      test: ["CMD-SHELL", "temporal operator cluster health --address $$(hostname -i):7233"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.137.0@sha256:886722fe0f37af9d1fe24d29529253ec59fbf263b3b1df4facaf221373e19d23
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "127.0.0.1:${ODA_OTLP_GRPC_PORT:-4317}:4317"
+      - "127.0.0.1:${ODA_OTLP_HTTP_PORT:-4318}:4318"
+      - "127.0.0.1:${ODA_OTEL_METRICS_PORT:-9464}:9464"
+    healthcheck:
+      test: ["CMD", "/otelcol-contrib", "components"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+  prometheus:
+    image: prom/prometheus:v3.7.1@sha256:ff7e389acbe064a4823212a500393d40a28a8f362e4b05cbf6742a9a3ef736b2
+    command:
+      [
+        "--config.file=/etc/prometheus/prometheus.yml",
+        "--storage.tsdb.path=/prometheus",
+        "--web.enable-lifecycle",
+      ]
+    volumes:
+      - ./prometheus.yaml:/etc/prometheus/prometheus.yml:ro
+      - oda-prometheus:/prometheus
+    ports:
+      - "127.0.0.1:${ODA_PROMETHEUS_PORT:-9090}:9090"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:9090/-/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+volumes:
+  oda-postgres:
+    name: ${ODA_COMPOSE_PROJECT:-oda-phase1}-postgres
+  oda-prometheus:
+    name: ${ODA_COMPOSE_PROJECT:-oda-phase1}-prometheus

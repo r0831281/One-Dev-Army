@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "1.0",
+  "id": "80000000-0000-4000-8000-000000000001",
+  "name": "planner-local",
+  "revision": 1,
+  "role": "planner",
+  "provider": "ollama",
+  "model": "configured-local-model",
+  "credentialRef": null,
+  "providerOptions": {"temperature": 0.2, "reasoningEffort": null},
+  "limits": {"maxInputTokens": 32000, "maxOutputTokens": 4000, "timeoutMs": 120000, "maxModelCalls": 8},
+  "tools": ["repo.read", "repo.search"],
+  "prompt": {
+    "templateId": "planner-v1",
+    "templateRevision": 1,
+    "intent": "Plan small, testable changes while preserving the public API.",
+    "compiledArtifactId": null
+  },
+  "outputSchemaRef": "oda://schemas/plan/1",
+  "retryPolicy": {"transportAttempts": 3, "structuredOutputRepairs": 2},
+  "fallbackProfileIds": []
+}

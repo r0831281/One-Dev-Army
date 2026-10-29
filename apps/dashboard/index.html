@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>One Developer Army</title>
+    <link rel="stylesheet" href="./styles/dashboard.css" />
+  </head>
+  <body>
+    <a class="skip" href="#decision">Skip to decision</a
+    ><a class="skip" href="#workspace">Skip to selected run</a>
+    <header class="header">
+      <div class="brand-lockup">
+        <span class="brand-mark" aria-hidden="true">ODA</span>
+        <span class="brand-copy"
+          ><span class="brand">One Developer Army</span><small>local workspace</small></span
+        >
+      </div>
+      <span id="connection" class="status stale" role="status">Not connected</span>
+      <div class="header-actions">
+        <button id="demo-reset" class="demo-link" type="button" hidden>Reset demo</button>
+        <button id="settings-open" aria-haspopup="dialog" aria-controls="settings-dialog">⚙ Settings</button>
+      </div>
+      <div class="metrics" aria-label="Workspace usage">
+        <span class="metric"><b id="tokens">0</b><small class="muted"> tokens</small></span
+        ><span class="metric"><b id="cost">USD 0.00</b><small class="muted"> estimated</small></span
+        ><span class="metric"><b id="unpriced">0</b><small class="muted"> unpriced</small></span
+        ><span class="metric"><b id="active">0</b><small class="muted"> active</small></span>
+      </div>
+    </header>
+    <div class="shell">
+      <nav class="runs" aria-label="Work">
+        <div class="rail-heading">
+          <h2>Work</h2>
+          <span id="work-count" class="count-badge">0 tasks</span>
+        </div>
+        <div class="work-tabs" role="tablist" aria-label="Work views">
+          <button class="work-tab" role="tab" aria-selected="false" data-work-view="tasks">Tasks</button>
+          <button
+            class="work-tab work-tab-attention"
+            role="tab"
+            aria-selected="true"
+            data-work-view="attention"
+          >
+            Needs you <span id="attention-count" class="attention-count">0</span>
+          </button>
+          <button class="work-tab" role="tab" aria-selected="false" data-work-view="runs">Executions</button>
+        </div>
+        <label class="run-detail"
+          >Filter <input id="filter" type="search" placeholder="Title, source, repository"
+        /></label>
+        <p id="run-empty" class="run-detail" aria-live="polite">Connect to load ingested work.</p>
+        <p id="work-group" class="run-group run-detail">Ingested tasks</p>
+        <div id="runs"></div>
+      </nav>
+      <main id="workspace" class="workspace" tabindex="-1">
+        <div id="banner" class="panel banner" role="alert">
+          Offline. Cached content remains visible with timestamps; mutations are disabled.
+        </div>
+        <section id="decision" class="panel gate" aria-live="polite" hidden></section>
+        <section class="panel planner" aria-labelledby="planner-title">
+          <div class="planner-head">
+            <div>
+              <h2 id="planner-title">This week</h2>
+              <p id="week-range">Read-only weekly planning from Jira</p>
+            </div>
+            <div class="week-nav" aria-label="Week navigation">
+              <button id="week-prev" aria-label="Previous week">←</button>
+              <button id="week-today">Today</button>
+              <button id="week-next" aria-label="Next week">→</button>
+            </div>
+          </div>
+          <div id="week-grid" class="week-grid" aria-label="Weekly task plan"></div>
+        </section>
+        <section id="summary" class="panel run-hero">
+          <h1>No run selected</h1>
+          <p>
+            Connect a source or ingest a task to begin. Nothing is published, merged, pushed, or tagged
+            without an explicit policy-enabled action.
+          </p>
+        </section>
+        <section class="panel execution-panel">
+          <div class="section-heading">
+            <div>
+              <h2>Automation progress</h2>
+              <p>What the agents are doing for this task</p>
+            </div>
+            <span id="stage-count" class="phase-badge">7 stages</span>
+          </div>
+          <p class="progress-help">
+            This view updates automatically. You do not control these stages; when your input is needed, a
+            decision card appears above.
+          </p>
+          <ol id="graph" class="graph" aria-label="Execution steps"></ol>
+        </section>
+        <section class="panel inspector">
+          <div class="tabs" role="tablist" aria-label="Run inspector">
+            <button class="tab" role="tab" aria-selected="true" data-tab="plan">Plan</button
+            ><button class="tab" role="tab" aria-selected="false" data-tab="diff">Diff</button
+            ><button class="tab" role="tab" aria-selected="false" data-tab="tests">Tests</button
+            ><button class="tab" role="tab" aria-selected="false" data-tab="review">Review</button>
+          </div>
+          <div id="inspector" role="tabpanel" tabindex="0"></div>
+        </section>
+      </main>
+      <aside class="activity" aria-label="Live activity">
+        <div class="rail-heading">
+          <h2>Live activity</h2>
+          <span class="status online">Streaming</span>
+        </div>
+        <div id="telemetry" class="telemetry-stack" aria-label="System telemetry, whole workspace">
+          <div class="telemetry-filters">
+            <label
+              >Agent / step role<select id="telemetry-agent">
+                <option value="">All agents</option>
+              </select></label
+            >
+            <label
+              >Provider / model<select id="telemetry-model">
+                <option value="">All models</option>
+              </select></label
+            >
+          </div>
+          <p id="telemetry-scope" class="telemetry-detail">
+            Token &amp; spend scope: all agents · all models
+          </p>
+          <article class="telemetry-card" id="burn-card">
+            <header><span>Token burn</span><span class="telemetry-state" data-status>Waiting</span></header>
+            <div class="telemetry-value"><span id="burn-value">—</span> <small>tokens / min</small></div>
+            <p class="telemetry-detail" id="burn-detail">Waiting for usage telemetry</p>
+            <svg
+              id="burn-chart"
+              class="telemetry-chart"
+              viewBox="0 0 260 58"
+              role="img"
+              aria-label="Input and output token rates over five minutes"
+            ></svg>
+            <div class="telemetry-foot">
+              <span>INPUT · CYAN / OUTPUT · VIOLET</span><span>5 MIN → NOW</span>
+            </div>
+          </article>
+          <article class="telemetry-card" id="velocity-card">
+            <header>
+              <span>Workspace velocity</span><span class="telemetry-state" data-status>Waiting</span>
+            </header>
+            <div class="telemetry-value"><span id="velocity-value">—</span> <small>steps / min</small></div>
+            <p class="telemetry-detail" id="velocity-detail">Waiting for execution telemetry</p>
+            <div class="velocity-lanes" aria-hidden="true">
+              <div class="velocity-lane"></div>
+              <div class="velocity-lane"></div>
+              <div class="velocity-lane"></div>
+            </div>
+            <svg
+              id="velocity-chart"
+              class="telemetry-chart"
+              viewBox="0 0 260 58"
+              role="img"
+              aria-label="Completed agent steps over five minutes"
+            ></svg>
+            <div class="telemetry-foot"><span>COMPLETED AGENT STEPS</span><span>5 MIN → NOW</span></div>
+          </article>
+          <article class="telemetry-card" id="spend-card" data-tone="amber">
+            <header><span>Spend pace</span><span class="telemetry-state" data-status>Waiting</span></header>
+            <div class="telemetry-value"><span id="spend-value">—</span> <small>USD / min</small></div>
+            <p class="telemetry-detail" id="spend-detail">Waiting for pricing telemetry</p>
+            <svg
+              id="spend-chart"
+              class="telemetry-chart"
+              viewBox="0 0 260 58"
+              role="img"
+              aria-label="Known model spend rate over five minutes"
+            ></svg>
+            <div class="telemetry-foot"><span>MODEL USAGE · USD</span><span>5 MIN → NOW</span></div>
+          </article>
+          <section class="contribution-panel" aria-label="Token and cost contributions">
+            <h3>Contributions <small class="muted">· last 5 min</small></h3>
+            <div class="contribution-controls">
+              <button type="button" data-contribution-group="agent" aria-pressed="true">Agents</button>
+              <button type="button" data-contribution-group="model" aria-pressed="false">Models</button>
+              <select id="contribution-sort" aria-label="Sort contributions">
+                <option value="tokens">By tokens</option>
+                <option value="spend">By cost</option>
+              </select>
+            </div>
+            <p id="contribution-note" class="telemetry-detail">Waiting for attributed telemetry</p>
+            <div id="contribution-rows"></div>
+          </section>
+        </div>
+        <div class="panel">
+          <h3>Sandbox resources</h3>
+          <label class="resource-row"
+            ><span>CPU</span><span class="gauge"><span id="cpu"></span></span
+            ><span id="cpu-label">—</span></label
+          >
+          <label class="resource-row"
+            ><span>RAM</span><span class="gauge"><span id="ram"></span></span
+            ><span id="ram-label">—</span></label
+          >
+          <svg
+            id="spark"
+            class="spark"
+            viewBox="0 0 300 42"
+            preserveAspectRatio="none"
+            aria-label="60-sample resource trend"
+          ></svg>
+        </div>
+        <div class="panel">
+          <h3>Tool timeline</h3>
+          <ol id="timeline"></ol>
+        </div>
+        <h3>Terminal <small class="muted">redacted · 10,000-line bounded buffer</small></h3>
+        <div
+          id="terminal"
+          class="terminal"
+          role="log"
+          aria-live="off"
+          aria-label="Redacted terminal output"
+        ></div>
+      </aside>
+    </div>
+    <nav class="mobile-dock" aria-label="Mobile dashboard views">
+      <button data-mobile-view="overview" aria-current="true">Overview</button>
+      <button data-mobile-view="activity" aria-current="false">Activity</button>
+      <button data-mobile-view="runs" aria-current="false">Work</button>
+    </nav>
+    <dialog id="settings-dialog" class="settings-dialog" aria-labelledby="settings-title">
+      <div class="settings-heading">
+        <h2 id="settings-title">Settings</h2>
+        <button id="settings-close" aria-label="Close settings">Close ×</button>
+      </div>
+      <section class="panel" aria-labelledby="horizon-title">
+        <div class="section-heading">
+          <h2 id="horizon-title">Agent work horizon</h2>
+          <span id="horizon-mode" class="phase-badge">7 days ahead</span>
+        </div>
+        <p class="muted" id="horizon-description">
+          Tasks stay in the backlog. Agents only start work on dated tasks inside the horizon, including
+          overdue tasks.
+        </p>
+        <form id="horizon-form" class="toolbar">
+          <label
+            >Days ahead<input id="horizon-days" type="number" min="0" max="365" step="1" value="7" required
+          /></label>
+          <label>Calendar timezone<input id="horizon-timezone" value="Europe/Brussels" required /></label>
+          <button id="horizon-save" type="submit">Save horizon</button>
+        </form>
+        <p id="horizon-status" class="muted" role="status">
+          Undated tasks require a manual override. Running work continues.
+        </p>
+      </section>
+      <section class="panel">
+        <h3>Display &amp; connection</h3>
+        <div class="actions">
+          <button id="power" aria-label="Low power mode" aria-pressed="false" title="Toggle low-power mode">
+            Low-power mode: off
+          </button>
+          <button id="connect">Reconnect</button>
+        </div>
+      </section>
+      <details>
+        <summary>Agent profiles</summary>
+        <div id="settings-config"></div>
+      </details>
+    </dialog>
+    <script type="module" src="./dashboard.js"></script>
+  </body>
+</html>

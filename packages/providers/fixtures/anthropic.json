@@ -1,0 +1,9 @@
+{
+  "usage": {
+    "input_tokens": 80,
+    "output_tokens": 15,
+    "cache_read_input_tokens": 30,
+    "cache_creation_input_tokens": 10
+  },
+  "content": { "ok": true }
+}

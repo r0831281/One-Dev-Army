@@ -1,0 +1,15 @@
+name: Community plugin
+description: Propose a task-source plugin
+body:
+  - type: input
+    id: plugin
+    attributes: { label: Plugin ID and version }
+    validations: { required: true }
+  - type: textarea
+    id: grants
+    attributes: { label: Broker grants and why each is needed }
+    validations: { required: true }
+  - type: textarea
+    id: evidence
+    attributes: { label: Conformance, fixtures, image digest, and SBOM evidence }
+    validations: { required: true }

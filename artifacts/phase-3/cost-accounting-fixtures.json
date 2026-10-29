@@ -1,0 +1,9 @@
+{
+  "schemaVersion": "1.0",
+  "pricingSnapshot": {"id":"91000000-0000-4000-8000-000000000001","provider":"fixture","model":"fixture-model","currency":"USD","inputMicrousdPerMillion":1000000,"outputMicrousdPerMillion":2000000,"cacheReadMicrousdPerMillion":100000,"reasoningMicrousdPerMillion":2000000},
+  "cases": [
+    {"name":"reported-cache-reasoning","attempts":[{"operationId":"op-1","inputTokens":100,"outputTokens":20,"cacheReadTokens":25,"reasoningTokens":5,"amountMicrousd":155}],"adjustments":[{"deltaMicrousd":5}],"expectedMicrousd":160},
+    {"name":"transport-retry-distinct-attempts","attempts":[{"operationId":"op-2a","amountMicrousd":50},{"operationId":"op-2b","amountMicrousd":75}],"adjustments":[],"expectedMicrousd":125},
+    {"name":"unpriced-local","attempts":[{"operationId":"op-3","amountMicrousd":null}],"adjustments":[],"expectedMicrousd":null}
+  ]
+}

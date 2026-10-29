@@ -1,0 +1,135 @@
+openapi: 3.1.0
+info:
+  title: One Developer Army Phase 2 local control API
+  version: 0.2.0
+  description: Local-only command, projection, and human-gate API. JSON Schema source is docs/reference/schemas.json.
+servers:
+  - url: http://127.0.0.1:4310/api/v1
+security:
+  - localSession: []
+paths:
+  /tasks/{taskId}/runs:
+    post:
+      operationId: startTaskRun
+      parameters:
+        - $ref: "#/components/parameters/TaskId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [manifest, context, repositoryRoot]
+              properties:
+                manifest: {$ref: "schemas.json#/$defs/RunManifest"}
+                context: {$ref: "schemas.json#/$defs/TaskContext"}
+                repositoryRoot: {type: string, minLength: 1}
+      responses:
+        "202":
+          description: Durable start command accepted or replayed.
+        "409": {$ref: "#/components/responses/Conflict"}
+  /runs:
+    get:
+      operationId: listRuns
+      responses:
+        "200":
+          description: Revision-guarded run projections.
+  /runs/{runId}:
+    get:
+      operationId: getRun
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: Run manifest and latest projection.
+        "404": {$ref: "#/components/responses/NotFound"}
+  /runs/{runId}/gates/{gateId}/decisions:
+    post:
+      operationId: submitGateDecision
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+        - name: gateId
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "schemas.json#/$defs/GateDecisionInput"}
+      responses:
+        "200":
+          description: Typed Temporal Update completed.
+          content:
+            application/json:
+              schema: {$ref: "schemas.json#/$defs/DecisionReceipt"}
+        "202":
+          description: Decision command remains durable and pending reconciliation.
+        "409": {$ref: "#/components/responses/Conflict"}
+  /decisions/by-key/{key}:
+    get:
+      operationId: getDecisionByIdempotencyKey
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        "200":
+          description: RECORDED, PENDING, or ABSENT reconciliation state.
+  /runs/{runId}/cancel:
+    post:
+      operationId: cancelRun
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expectedStateRevision, reason]
+              properties:
+                expectedStateRevision: {type: integer, minimum: 0}
+                reason: {type: string, minLength: 1, maxLength: 8000}
+      responses:
+        "202":
+          description: Durable cooperative cancellation command accepted.
+        "409": {$ref: "#/components/responses/Conflict"}
+components:
+  securitySchemes:
+    localSession:
+      type: http
+      scheme: bearer
+  parameters:
+    TaskId:
+      name: taskId
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    RunId:
+      name: runId
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: {type: string, format: uuid}
+  responses:
+    Conflict:
+      description: State, gate-version, or idempotency conflict.
+      content:
+        application/json:
+          schema: {$ref: "schemas.json#/$defs/ApiError"}
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema: {$ref: "schemas.json#/$defs/ApiError"}

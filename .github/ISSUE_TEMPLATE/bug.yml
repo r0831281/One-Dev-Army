@@ -1,0 +1,17 @@
+name: Bug report
+description: Report a reproducible O-D-A defect without sensitive data
+body:
+  - type: markdown
+    attributes:
+      value: "Do not include secrets, prompts, raw terminal output, or private source content."
+  - type: input
+    id: version
+    attributes: { label: Version or manifest hash }
+    validations: { required: true }
+  - type: textarea
+    id: reproduction
+    attributes: { label: Reproduction, description: Include exact commands and observed/expected behavior. }
+    validations: { required: true }
+  - type: textarea
+    id: diagnostics
+    attributes: { label: Redacted diagnostics, description: Paste only the safe Phase 4 diagnostic summary. }

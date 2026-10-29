@@ -1,0 +1,115 @@
+{
+  "schemaVersion": "1.0",
+  "release": "0.4.0-phase.4",
+  "recordedAt": "2026-10-28T10:10:00.000Z",
+  "referenceMachine": {
+    "platform": "Windows x64",
+    "node": "22.12.0",
+    "pnpm": "11.25.0",
+    "browser": "Microsoft Edge 156.0.4314.50",
+    "dockerDesktop": "4.97.0",
+    "dockerEngine": "29.9.2",
+    "dockerCompose": "5.6.1",
+    "containerKernel": "6.18.40.1-microsoft-standard-WSL2"
+  },
+  "versions": {
+    "migrationHead": 5,
+    "contractSchema": "1.0",
+    "eventProtocol": "1.0",
+    "pluginProtocol": "1.0",
+    "workflowType": "TaskRunWorkflow",
+    "workflowVersions": [1, 2],
+    "taskQueue": "oda-task-run-v1",
+    "temporalService": "1.28.1",
+    "temporalSdk": "1.25.0",
+    "imageManifest": "infra/phase3-release-manifest.json"
+  },
+  "passed": [
+    {
+      "command": "pnpm check:markdown",
+      "evidence": "29 Markdown files; zero issues"
+    },
+    {
+      "command": "pnpm check:docs",
+      "evidence": "29 Markdown files, 27 local links, JSON/YAML rejection cases, 26 SQL tables, strict reference compilation"
+    },
+    {
+      "command": "pnpm test",
+      "evidence": "32/32 tests, including all three retained Temporal replay histories"
+    },
+    {
+      "command": "pnpm verify:phase4",
+      "evidence": "TypeScript and Python protocol conformance; Edge workload with 100 nodes, 10000 terminal lines, 3000 events, 60 terminal DOM lines, reduced motion"
+    },
+    {
+      "command": "docker compose -f infra/compose.yaml up -d --wait --wait-timeout 180",
+      "evidence": "PostgreSQL, Temporal, Collector, and Prometheus healthy"
+    },
+    {
+      "command": "node tools/verify-postgres.mjs",
+      "evidence": "migrations, ingestion, immutable context, command recovery, and external-write reconciliation passed"
+    },
+    {
+      "command": "node tools/verify-phase3-postgres.mjs",
+      "evidence": "retained upgrade and fresh install at head 5; Phase 3 immutability passed"
+    },
+    {
+      "command": "node tools/verify-phase3-temporal.mjs",
+      "evidence": "real 187-event version-2 workflow completed with worker restart, candidate-bound evidence, immutable usage, and reconciled fake-source report"
+    },
+    {
+      "command": "node tools/phase4-operations.mjs drill --output .validation/phase4-drill",
+      "evidence": "product and Temporal dumps restored to scoped temporary databases; head 5, 37 Temporal tables, artifact hashes, epoch rotation, vault refs, four-service health gate passed; drill databases removed"
+    },
+    {
+      "command": "node tools/phase4-operations.mjs diagnostics --output .validation/phase4-diagnostics",
+      "evidence": "local bundle excludes raw logs, prompts, and secrets"
+    },
+    {
+      "command": "pnpm audit --prod --audit-level high",
+      "evidence": "no known vulnerabilities"
+    },
+    {
+      "command": "pnpm licenses list --prod --json",
+      "evidence": "permissive/attribution licenses reviewed; unionfs missing SPDX field resolved from installed Unlicense text"
+    },
+    {
+      "command": "node tools/release-phase4.mjs",
+      "evidence": "549-component CycloneDX SBOM and Ed25519-signed local release manifest generated; publication false"
+    }
+  ],
+  "failedThenCorrected": [
+    {
+      "command": "pnpm typecheck",
+      "failure": "managed pnpm wrapper could not realpath the workspace",
+      "resolution": "installed TypeScript compiler passed immediately; canonical pnpm gates passed with explicit local access"
+    },
+    {
+      "command": "pnpm test",
+      "failure": "first Phase 4 dashboard revision omitted legacy Phase 2 vocabulary in static HTML and one new assertion was whitespace-sensitive",
+      "resolution": "compatibility vocabulary and robust assertion added; final suite passed 32/32"
+    },
+    {
+      "command": "pnpm verify:phase4",
+      "failure": "compiled scaffolder initially looked for templates under dist",
+      "resolution": "scaffolder now resolves source templates explicitly when run from the monorepo build; final TypeScript/Python/Edge gate passed"
+    }
+  ],
+  "unverified": [
+    "macOS and Linux clean-machine installation commands are documented but were not executed on this Windows reference machine",
+    "live provider credentials and paid calls",
+    "E2B remote-data execution",
+    "real GitHub or Jira source publication",
+    "public package/image publication, transparency log, public signing identity, push, merge, and tag"
+  ],
+  "policy": {
+    "localOnlyDefault": true,
+    "liveProviderOptIn": true,
+    "remoteExecutionOptIn": true,
+    "sourceWritesOptIn": true,
+    "publication": false,
+    "merge": false,
+    "push": false,
+    "tag": false
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "release": "0.3.0-phase.3",
+  "migrationHead": 5,
+  "contractSchemaVersion": "1.0-compatible-phase3",
+  "eventProtocolVersion": "1.0",
+  "workflow": { "type": "TaskRunWorkflow", "versions": [1, 2], "taskQueue": "oda-task-run-v1" },
+  "promptCompilerVersion": "1.0.0",
+  "images": {
+    "sandboxBase": "node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914",
+    "sandboxLocalId": "sha256:b6dac1ffc3c67a6a043528a4cdbcf5ae32a449006d7157ca80cb82d23e0f8f9a",
+    "sandboxBrokerLocalId": "sha256:cba1aadfa5e21a19cdfbb2356d31d7ecacc71acd5c37e2982a3263deb59c1496",
+    "securityVerifierLocalId": "sha256:52499ed9ea933d24322f46abe385c46a7d4b19aca98c69465036aa1a8fa82600"
+  },
+  "publication": { "images": false, "packages": false, "sourceWrites": "fake-only" }
+}

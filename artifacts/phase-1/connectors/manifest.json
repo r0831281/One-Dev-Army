@@ -1,0 +1,45 @@
+{
+  "schemaVersion": "1.0",
+  "release": "0.1.0-phase.1",
+  "generatedAt": "2026-10-27T18:00:37.657Z",
+  "signer": {
+    "algorithm": "Ed25519",
+    "publicKey": "attestation-public-key.pem",
+    "keyId": "924b2174d2f471495438b07fbb4441a5d5bcfb4c1115018cab0769febd72043b"
+  },
+  "connectors": {
+    "github": {
+      "tag": "oda-connector-github:0.1.0-phase.1",
+      "imageId": "sha256:66fca8af3da22010bdf0197144f8d81ed4cd0129e7a5e1ed91ce7e1feb28af03",
+      "manifest": {
+        "protocolVersion": "1.0",
+        "pluginId": "community.github",
+        "pluginVersion": "1.0.0",
+        "capabilities": [
+          "task:read",
+          "task:status",
+          "task:comment"
+        ]
+      },
+      "sbom": "github.spdx.json",
+      "attestation": "github.intoto.jsonl"
+    },
+    "jira": {
+      "tag": "oda-connector-jira:0.1.0-phase.1",
+      "imageId": "sha256:a7e2d0dc05881262eb9b705fa2932be969413af5bbd65b10cf3df8e37d991017",
+      "manifest": {
+        "protocolVersion": "1.0",
+        "pluginId": "community.jira",
+        "pluginVersion": "1.0.0",
+        "capabilities": [
+          "task:read",
+          "task:status",
+          "task:comment"
+        ]
+      },
+      "sbom": "jira.spdx.json",
+      "attestation": "jira.intoto.jsonl"
+    }
+  },
+  "publication": "local-only"
+}

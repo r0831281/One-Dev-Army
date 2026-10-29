@@ -1,0 +1,30 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+allowBuilds:
+  "@swc/core": true
+  protobufjs: true
+
+minimumReleaseAgeExclude:
+  - "@electric-sql/pglite@0.5.12"
+  - "@typescript-eslint/eslint-plugin@8.72.1"
+  - "@typescript-eslint/parser@8.72.1"
+  - "@typescript-eslint/project-service@8.72.1"
+  - "@typescript-eslint/scope-manager@8.72.1"
+  - "@typescript-eslint/tsconfig-utils@8.72.1"
+  - "@typescript-eslint/type-utils@8.72.1"
+  - "@typescript-eslint/types@8.72.1"
+  - "@typescript-eslint/typescript-estree@8.72.1"
+  - "@typescript-eslint/utils@8.72.1"
+  - "@typescript-eslint/visitor-keys@8.72.1"
+  - typescript-eslint@8.72.1
+  - "@temporalio/activity@1.25.0"
+  - "@temporalio/client@1.25.0"
+  - "@temporalio/common@1.25.0"
+  - "@temporalio/core-bridge@1.25.0"
+  - "@temporalio/nexus@1.25.0"
+  - "@temporalio/proto@1.25.0"
+  - "@temporalio/testing@1.25.0"
+  - "@temporalio/worker@1.25.0"
+  - "@temporalio/workflow@1.25.0"

@@ -1,0 +1,32 @@
+{
+  "status": "passed",
+  "runId": "bd40f94c-80c3-4520-b56d-413f5c284b88",
+  "workflowId": "task/239ce9c4-9e9c-4bd9-9997-467800f39112/run/bd40f94c-80c3-4520-b56d-413f5c284b88",
+  "finalState": "COMPLETED",
+  "planRevision": 2,
+  "feedbackProvenance": {
+    "id": "feedback/f13e7425-3dfe-4f71-a706-2e5c4eae5a77",
+    "text": "Keep the fake completion explicitly offline.",
+    "origin": "human-feedback",
+    "sourceRef": "gate/73e44153-0c38-49ad-b27d-d41a6bedf24f/version/1"
+  },
+  "simultaneousDecisionOutcomes": [
+    "fulfilled",
+    "rejected"
+  ],
+  "apiRestartRecovery": "passed",
+  "workerRestartAtEveryGateKind": "passed",
+  "temporalRestartAtEveryGateKind": "passed",
+  "apiRestartAtEveryGateKind": "passed",
+  "exhaustedBudgetRecovery": "passed",
+  "sameKeyRetry": "passed",
+  "differentPayloadConflict": "passed",
+  "staleGateVersionDenial": "passed",
+  "networkLossAfterDurableDecision": "passed",
+  "pendingReceiptLookup": "passed",
+  "cancellation": "passed",
+  "cooperativeActivityCancellation": "passed",
+  "noIdleActivityDuringHumanWait": "passed",
+  "continueAsNew": "passed",
+  "replayInitialAndCompatibleEvolution": "passed"
+}

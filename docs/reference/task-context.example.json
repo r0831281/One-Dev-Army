@@ -1,0 +1,34 @@
+{
+  "schemaVersion": "1.0",
+  "taskId": "20000000-0000-4000-8000-000000000001",
+  "revision": 1,
+  "source": {
+    "instanceId": "60000000-0000-4000-8000-000000000001",
+    "externalId": "42",
+    "key": "acme/app#42",
+    "url": "https://github.com/acme/app/issues/42",
+    "revision": "2026-10-26T09:00:00Z"
+  },
+  "repository": {
+    "id": "90000000-0000-4000-8000-000000000001",
+    "baseSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "title": "Preserve pagination filters when moving to the next page",
+  "description": "The next-page link loses the selected status filter.",
+  "acceptanceCriteria": [
+    "Next and previous links preserve the selected status filter.",
+    "A regression test covers a filtered list with two pages."
+  ],
+  "attachments": [],
+  "labels": ["bug"],
+  "requester": {"id": "developer-1", "displayName": "Developer"},
+  "constraints": [
+    {"id": "public-api", "text": "Preserve existing public endpoint signatures.", "origin": "task", "sourceRef": "acme/app#42"}
+  ],
+  "provenance": {
+    "fetchedAt": "2026-10-26T10:00:00Z",
+    "pluginId": "community.github",
+    "pluginVersion": "1.0.0",
+    "payloadArtifactId": null
+  }
+}

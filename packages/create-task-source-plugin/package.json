@@ -1,0 +1,9 @@
+{
+  "name": "create-task-source-plugin",
+  "version": "0.4.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "create-task-source-plugin": "./src/bin.ts"
+  }
+}

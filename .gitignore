@@ -1,0 +1,5 @@
+node_modules/
+.validation/
+.test-tmp/
+dist/
+*.tsbuildinfo

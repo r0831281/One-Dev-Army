@@ -1,0 +1,6 @@
+{
+  "name": "@oda/worker",
+  "private": true,
+  "type": "module",
+  "version": "0.2.0"
+}

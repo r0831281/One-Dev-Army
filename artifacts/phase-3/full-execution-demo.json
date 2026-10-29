@@ -1,0 +1,215 @@
+{
+  "schemaVersion": "1.0",
+  "generatedAt": "2026-10-28T09:33:32.858Z",
+  "mode": "fake-provider-hardened-docker-fake-source",
+  "promptHash": "9a819bf3697d33a506074cebb50ec51f97c327b312d3848814cf43e541a60a35",
+  "modelResponseHash": "c0043dea651e1c788911d880b8066e1c506983a91097611ed450e3c9ad03fb0f",
+  "candidateHash": "10831916faf7964fc71819172273c1650d8d388a9f9e2f4691130ca19e2e927b",
+  "testReceipt": {
+    "schemaVersion": "1.0",
+    "operationId": "93000000-0000-4000-8000-000000000001",
+    "state": "COMPLETED",
+    "startedAt": "2026-10-28T09:33:32.413Z",
+    "completedAt": "2026-10-28T09:33:32.856Z",
+    "exitCode": 0,
+    "signal": null,
+    "stdout": "1 test passed",
+    "stderr": "",
+    "outputBytes": 13,
+    "commandHash": "0e8c9bdad8d2f3182eaf82924ce8332890f3edb80a4717a485fcb6deb7b348f9",
+    "backend": "docker"
+  },
+  "finalGate": {
+    "candidateHash": "10831916faf7964fc71819172273c1650d8d388a9f9e2f4691130ca19e2e927b",
+    "testReceipts": [
+      {
+        "kind": "test",
+        "candidateHash": "10831916faf7964fc71819172273c1650d8d388a9f9e2f4691130ca19e2e927b",
+        "artifactHash": "0e8c9bdad8d2f3182eaf82924ce8332890f3edb80a4717a485fcb6deb7b348f9",
+        "passed": true,
+        "operationId": "93000000-0000-4000-8000-000000000001"
+      }
+    ],
+    "reviewReceipts": [
+      {
+        "kind": "review",
+        "candidateHash": "10831916faf7964fc71819172273c1650d8d388a9f9e2f4691130ca19e2e927b",
+        "artifactHash": "4444444444444444444444444444444444444444444444444444444444444444",
+        "passed": true,
+        "operationId": "94000000-0000-4000-8000-000000000001"
+      }
+    ],
+    "usageArtifactHash": "5555555555555555555555555555555555555555555555555555555555555555",
+    "manifestHash": "6666666666666666666666666666666666666666666666666666666666666666",
+    "bundleHash": "fbed46cadbb49fe17a984a040d3e10c62e3b52512ab6411a92001ae388776635"
+  },
+  "usage": {
+    "budget": {
+      "maxCalls": 4,
+      "maxMicrousd": 1000,
+      "reservedCalls": 0,
+      "reservedMicrousd": 0,
+      "spentMicrousd": 0,
+      "unpricedCalls": 1
+    },
+    "attempts": [
+      {
+        "attemptId": "95000000-0000-4000-8000-000000000001",
+        "operationId": "92000000-0000-4000-8000-000000000001",
+        "runId": "96000000-0000-4000-8000-000000000001",
+        "stepId": "97000000-0000-4000-8000-000000000001",
+        "provider": "fake",
+        "model": "fixture",
+        "category": "model",
+        "inputTokens": 311,
+        "outputTokens": 5,
+        "cacheReadTokens": 0,
+        "cacheWriteTokens": 0,
+        "reasoningTokens": 0,
+        "source": "estimated",
+        "amountMicrousd": null,
+        "pricingSnapshotId": null,
+        "observedAt": "2026-10-28T09:33:32.857Z"
+      }
+    ],
+    "adjustments": []
+  },
+  "report": {
+    "operationKey": "98000000-0000-4000-8000-000000000001",
+    "runId": "96000000-0000-4000-8000-000000000001",
+    "sourceId": "fake-source",
+    "kind": "comment",
+    "requestHash": "b96c2964c0d95e21db44618d2f3536506cbd4b335b693ad815ad5dc498b0b637",
+    "marker": "<!-- oda:98000000-0000-4000-8000-000000000001 -->",
+    "state": "APPLIED",
+    "receipt": {
+      "remoteId": "fake-comment-1",
+      "marker": "<!-- oda:98000000-0000-4000-8000-000000000001 -->"
+    }
+  },
+  "sandbox": {
+    "id": "59f2c13b-743f-47e1-8740-f2c049408b94",
+    "runId": "96000000-0000-4000-8000-000000000001",
+    "state": "DESTROYED",
+    "expiresAt": 1793180072858,
+    "destroyedReason": "success"
+  },
+  "events": [
+    {
+      "protocolVersion": "1.0",
+      "workspaceId": "00000000-0000-4000-8000-000000000001",
+      "seq": 1,
+      "epoch": "phase3-demo-epoch",
+      "eventId": "10ae09f4-6196-4abd-b253-81ef8893ecd8",
+      "type": "task.ingested",
+      "occurredAt": "2026-10-28T09:33:32.857Z",
+      "payload": {
+        "candidateHash": "10831916faf7964fc71819172273c1650d8d388a9f9e2f4691130ca19e2e927b"
+      }
+    },
+    {
+      "protocolVersion": "1.0",
+      "workspaceId": "00000000-0000-4000-8000-000000000001",
+      "seq": 2,
+      "epoch": "phase3-demo-epoch",
+      "eventId": "591dd7ba-f8cf-4392-9576-85930caf3a4f",
+      "type": "plan.rejected",
+      "occurredAt": "2026-10-28T09:33:32.857Z",
+      "payload": {
+        "candidateHash": "10831916faf7964fc71819172273c1650d8d388a9f9e2f4691130ca19e2e927b"
+      }
+    },
+    {
+      "protocolVersion": "1.0",
+      "workspaceId": "00000000-0000-4000-8000-000000000001",
+      "seq": 3,
+      "epoch": "phase3-demo-epoch",
+      "eventId": "0f13f676-1ab0-41f6-ae69-955347701c58",
+      "type": "plan.replanned",
+      "occurredAt": "2026-10-28T09:33:32.858Z",
+      "payload": {
+        "candidateHash": "10831916faf7964fc71819172273c1650d8d388a9f9e2f4691130ca19e2e927b"
+      }
+    },
+    {
+      "protocolVersion": "1.0",
+      "workspaceId": "00000000-0000-4000-8000-000000000001",
+      "seq": 4,
+      "epoch": "phase3-demo-epoch",
+      "eventId": "c417cb55-98c6-4f22-8d52-74193ea81d0d",
+      "type": "plan.approved",
+      "occurredAt": "2026-10-28T09:33:32.858Z",
+      "payload": {
+        "candidateHash": "10831916faf7964fc71819172273c1650d8d388a9f9e2f4691130ca19e2e927b"
+      }
+    },
+    {
+      "protocolVersion": "1.0",
+      "workspaceId": "00000000-0000-4000-8000-000000000001",
+      "seq": 5,
+      "epoch": "phase3-demo-epoch",
+      "eventId": "1368f93e-0e00-45f0-8825-0878d0bbc847",
+      "type": "candidate.sealed",
+      "occurredAt": "2026-10-28T09:33:32.858Z",
+      "payload": {
+        "candidateHash": "10831916faf7964fc71819172273c1650d8d388a9f9e2f4691130ca19e2e927b"
+      }
+    },
+    {
+      "protocolVersion": "1.0",
+      "workspaceId": "00000000-0000-4000-8000-000000000001",
+      "seq": 6,
+      "epoch": "phase3-demo-epoch",
+      "eventId": "80c7c58a-e8b6-4b93-9f6f-25357fb7fe77",
+      "type": "tests.passed",
+      "occurredAt": "2026-10-28T09:33:32.858Z",
+      "payload": {
+        "candidateHash": "10831916faf7964fc71819172273c1650d8d388a9f9e2f4691130ca19e2e927b"
+      }
+    },
+    {
+      "protocolVersion": "1.0",
+      "workspaceId": "00000000-0000-4000-8000-000000000001",
+      "seq": 7,
+      "epoch": "phase3-demo-epoch",
+      "eventId": "ce2c010f-b19e-4f30-b2e9-ca02cceeb96d",
+      "type": "review.passed",
+      "occurredAt": "2026-10-28T09:33:32.858Z",
+      "payload": {
+        "candidateHash": "10831916faf7964fc71819172273c1650d8d388a9f9e2f4691130ca19e2e927b"
+      }
+    },
+    {
+      "protocolVersion": "1.0",
+      "workspaceId": "00000000-0000-4000-8000-000000000001",
+      "seq": 8,
+      "epoch": "phase3-demo-epoch",
+      "eventId": "3f02b55d-4bae-49da-a9f8-40743dd293f9",
+      "type": "final.approved",
+      "occurredAt": "2026-10-28T09:33:32.858Z",
+      "payload": {
+        "candidateHash": "10831916faf7964fc71819172273c1650d8d388a9f9e2f4691130ca19e2e927b"
+      }
+    },
+    {
+      "protocolVersion": "1.0",
+      "workspaceId": "00000000-0000-4000-8000-000000000001",
+      "seq": 9,
+      "epoch": "phase3-demo-epoch",
+      "eventId": "812c97cf-31de-45c3-a15b-8f1276dd6cbf",
+      "type": "source.reported",
+      "occurredAt": "2026-10-28T09:33:32.858Z",
+      "payload": {
+        "state": "APPLIED",
+        "marker": "<!-- oda:98000000-0000-4000-8000-000000000001 -->"
+      }
+    }
+  ],
+  "assertions": {
+    "promptStable": true,
+    "exactPatchEvidence": true,
+    "testsPassed": true,
+    "reportApplied": true,
+    "cleanupPassed": true
+  }
+}
