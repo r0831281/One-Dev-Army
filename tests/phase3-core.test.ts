@@ -162,11 +162,11 @@ test("provider fixtures normalize retry, cache, reasoning, and unknown usage wit
         operationId: "x",
         model: "fixture",
         messages: [],
-        outputSchema: {},
+        temperature: 0.2,
         timeoutMs: 1000,
         maxOutputTokens: 10,
       }),
-    /UNSUPPORTED_CAPABILITY/,
+    /UNSUPPORTED_CAPABILITY:temperature/,
   );
   assert.throws(() => assertLiveProbeConsent({}, 0.01), /NOT_AUTHORIZED/);
 });

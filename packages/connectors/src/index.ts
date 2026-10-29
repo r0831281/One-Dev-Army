@@ -1,4 +1,4 @@
-import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import type { TaskContext } from "../../contracts/src/index.js";
 import { validateTaskContext } from "../../contracts/src/index.js";
 
@@ -10,7 +10,21 @@ export interface ConnectorContext {
   instanceId: string;
   repository: { id: string; baseSha: string };
   fetchedAt: string;
+  /** Planning known for this task from a separate planning source (Tempo), merged into the context. */
+  planning?: TaskPlanning;
+  /**
+   * Set when the repository was chosen for this task (by key prefix) rather than by the connector.
+   * Moving the pin to another repository or commit must yield a new context revision.
+   */
+  repositoryPinned?: boolean;
 }
+export interface TaskPlanning {
+  plannedFor: string | null;
+  dates: Array<{ date: string; seconds: number }>;
+  jiraKey: string;
+  planIds: string[];
+}
+export const TEMPO_PLANNING_EXTENSION = "community.tempo.planning";
 export interface ScopedHttp {
   request<T>(request: { method: string; url: string; body?: unknown }): Promise<T>;
 }
@@ -50,6 +64,15 @@ function base(
     "schemaVersion" | "taskId" | "revision" | "source" | "repository" | "constraints" | "provenance"
   > & { url: string; sourceRevision: string | null; pluginId: string },
 ): TaskContext {
+  const extensions = context.planning
+    ? { ...fields.extensions, [TEMPO_PLANNING_EXTENSION]: context.planning }
+    : fields.extensions;
+  // Context revisions are keyed by source revision, so a moved plan must yield a distinct revision.
+  const tag = (value: unknown) =>
+    createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 16);
+  let revision = fields.sourceRevision;
+  if (revision !== null && context.planning) revision = `${revision}|plan:${tag(context.planning)}`;
+  if (revision !== null && context.repositoryPinned) revision = `${revision}|repo:${tag(context.repository)}`;
   return validateTaskContext({
     schemaVersion: "1.0",
     taskId: randomUUID(),
@@ -59,7 +82,7 @@ function base(
       externalId: ref.externalId,
       key: ref.key,
       url: fields.url,
-      revision: fields.sourceRevision,
+      revision,
     },
     repository: context.repository,
     title: fields.title,
@@ -75,7 +98,7 @@ function base(
       pluginVersion: "1.0.0",
       payloadArtifactId: null,
     },
-    ...(fields.extensions ? { extensions: fields.extensions } : {}),
+    ...(extensions ? { extensions } : {}),
   });
 }
 
@@ -268,6 +291,33 @@ interface JiraIssue {
     reporter: { accountId: string; displayName: string } | null;
   };
 }
+/** Field names that hold the customer, most specific first: JSM organizations, a custom customer field, Tempo account. */
+const JIRA_CUSTOMER_FIELDS = [
+  /^organi[sz]ations?$/i,
+  /^(customer|klant|client)( name)?$/i,
+  /^(tempo )?account$/i,
+];
+function jiraFieldLabel(value: unknown): string | null {
+  if (typeof value === "string") return value.trim() || null;
+  if (Array.isArray(value)) return value.map(jiraFieldLabel).find(Boolean) ?? null;
+  if (value && typeof value === "object") {
+    const record = value as { name?: unknown; value?: unknown; displayName?: unknown };
+    return jiraFieldLabel(record.name ?? record.value ?? record.displayName ?? null);
+  }
+  return null;
+}
+export function jiraCustomer(
+  fields: Record<string, unknown>,
+  names: Record<string, string> = {},
+): { customer: string; field: string } | null {
+  for (const pattern of JIRA_CUSTOMER_FIELDS)
+    for (const [id, name] of Object.entries(names)) {
+      if (!pattern.test(name.trim())) continue;
+      const customer = jiraFieldLabel(fields[id]);
+      if (customer) return { customer, field: name };
+    }
+  return null;
+}
 interface JiraComment {
   id: string;
   body: unknown;
@@ -296,11 +346,12 @@ export class JiraConnector implements TaskConnector {
     return { externalId: key, key };
   }
   async fetchTask(ref: SourceRef, context: ConnectorContext): Promise<TaskContext> {
-    const issue = await this.http.request<JiraIssue>({
+    const issue = await this.http.request<JiraIssue & { names?: Record<string, string> }>({
       method: "GET",
-      url: `${this.origin}/rest/api/3/issue/${encodeURIComponent(ref.key)}`,
+      url: `${this.origin}/rest/api/3/issue/${encodeURIComponent(ref.key)}?expand=names`,
     });
     if (issue.fields.project.key !== this.projectKey) throw new Error("POLICY_DENIED");
+    const customer = jiraCustomer(issue.fields, issue.names);
     const planningValue = issue.fields[this.planningField];
     const plannedFor =
       typeof planningValue === "string" && /^\d{4}-\d{2}-\d{2}$/.test(planningValue) ? planningValue : null;
@@ -311,7 +362,10 @@ export class JiraConnector implements TaskConnector {
         title: issue.fields.summary,
         description: adfText(issue.fields.description).trim(),
         url: `${this.origin}/browse/${encodeURIComponent(issue.key)}`,
-        sourceRevision: issue.fields.updated,
+        // The customer is derived, not edited, so it is part of the revision key like Tempo planning.
+        sourceRevision: customer
+          ? `${issue.fields.updated}|customer:${createHash("sha256").update(JSON.stringify(customer)).digest("hex").slice(0, 16)}`
+          : issue.fields.updated,
         labels: issue.fields.labels,
         requester: issue.fields.reporter
           ? { id: issue.fields.reporter.accountId, displayName: issue.fields.reporter.displayName }
@@ -324,6 +378,7 @@ export class JiraConnector implements TaskConnector {
             plannedFor,
             field: this.planningField,
           },
+          ...(customer ? { "community.jira.customer": customer } : {}),
         },
       },
     );
@@ -400,6 +455,158 @@ export class JiraConnector implements TaskConnector {
     } catch {
       return { status: "UNCERTAIN", operationId: input.operationId, remoteId: null, url: null };
     }
+  }
+}
+
+/** Odoo task keys such as `X-Y-62` or `ABC-1233`: a project code of one or more segments and a number. */
+export const ODOO_TASK_KEY = /^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*-[1-9]\d*$/;
+/** RE2-safe routing pattern accepting the same keys (routing rejects nested repetition). */
+export const ODOO_TASK_KEY_ROUTE = "^[A-Z][A-Z0-9-]*-[1-9][0-9]*$";
+
+const HTML_ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
+/** Converts Odoo HTML fields to plain text without interpreting or executing any markup. */
+export function htmlText(value: unknown): string {
+  if (typeof value !== "string") return "";
+  return value
+    .replace(/<(script|style)\b[\s\S]*?<\/\1\s*>/gi, "")
+    .replace(/<li\b[^>]*>/gi, "\n- ")
+    .replace(/<br\s*\/?>|<\/(p|div|h[1-6]|tr|blockquote|pre|ul|ol)\s*>/gi, "\n")
+    .replace(/<[^>]*>/g, "")
+    .replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (entity, name: string) => {
+      if (name[0] === "#") {
+        const code = name[1] === "x" || name[1] === "X" ? parseInt(name.slice(2), 16) : Number(name.slice(1));
+        return Number.isInteger(code) && code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : entity;
+      }
+      return HTML_ENTITIES[name.toLowerCase()] ?? entity;
+    })
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+export interface OdooOptions {
+  apiVersion: "json2" | "jsonrpc";
+  database: string;
+  /** Login of the API user; only the JSON-RPC protocol needs it. */
+  login: string;
+  keyField: string;
+}
+interface OdooTask {
+  id: number;
+  name: string;
+  description: string | false;
+  write_date: string;
+  project_id: [number, string] | false;
+  partner_id?: [number, string] | false;
+  date_deadline: string | false;
+  [field: string]: unknown;
+}
+interface JsonRpcReply<T> {
+  result?: T;
+  error?: { data?: { name?: unknown } };
+}
+export class OdooConnector implements TaskConnector {
+  private uid: number | null = null;
+  constructor(
+    private readonly origin: string,
+    private readonly http: ScopedHttp,
+    private readonly options: OdooOptions,
+  ) {
+    if (!/^[a-z_][a-z0-9_]*$/.test(options.keyField)) throw new Error("INVALID_CONNECTOR_SCOPE");
+  }
+  normalize(input: string | Record<string, unknown>): SourceRef {
+    const key = typeof input === "string" ? input : input.key;
+    if (typeof key !== "string" || key.length > 200 || !ODOO_TASK_KEY.test(key))
+      throw new Error("POLICY_DENIED");
+    return { externalId: key, key };
+  }
+  private async rpc<T>(service: string, method: string, args: unknown[]): Promise<T> {
+    // The password position stays null: the scoped transport injects the API key.
+    const reply = await this.http.request<JsonRpcReply<T>>({
+      method: "POST",
+      url: `${this.origin}/jsonrpc`,
+      body: { jsonrpc: "2.0", method: "call", id: 1, params: { service, method, args } },
+    });
+    if (reply.error || reply.result === undefined) {
+      const name = String(reply.error?.data?.name ?? "");
+      throw new Error(
+        /AccessDenied|AccessError/.test(name) ? "CONNECTOR_HTTP_403" : "CONNECTOR_REMOTE_ERROR",
+      );
+    }
+    return reply.result;
+  }
+  private async searchTasks(key: string): Promise<OdooTask[]> {
+    const domain = [[this.options.keyField, "=", key]];
+    const fields = [
+      "id",
+      "name",
+      "description",
+      "write_date",
+      "project_id",
+      "date_deadline",
+      "partner_id",
+      this.options.keyField,
+    ];
+    if (this.options.apiVersion === "json2")
+      return this.http.request<OdooTask[]>({
+        method: "POST",
+        url: `${this.origin}/json/2/project.task/search_read`,
+        body: { domain, fields, limit: 2 },
+      });
+    this.uid ??= await this.rpc<number | false>("common", "login", [
+      this.options.database,
+      this.options.login,
+      null,
+    ]).then((uid) => {
+      if (typeof uid !== "number") throw new Error("CONNECTOR_HTTP_401");
+      return uid;
+    });
+    return this.rpc<OdooTask[]>("object", "execute_kw", [
+      this.options.database,
+      this.uid,
+      null,
+      "project.task",
+      "search_read",
+      [domain],
+      { fields, limit: 2 },
+    ]);
+  }
+  async fetchTask(ref: SourceRef, context: ConnectorContext): Promise<TaskContext> {
+    const key = this.normalize(ref.key).key;
+    const tasks = await this.searchTasks(key);
+    if (tasks.length === 0) throw new Error("NOT_FOUND");
+    if (tasks.length > 1) throw new Error("AMBIGUOUS_SOURCE_KEY");
+    const task = tasks[0]!;
+    if (task[this.options.keyField] !== key) throw new Error("POLICY_DENIED");
+    return base(
+      context,
+      { externalId: String(task.id), key },
+      {
+        title: task.name.slice(0, 500),
+        description: htmlText(task.description).slice(0, 200_000),
+        url: `${this.origin}/web#id=${task.id}&model=project.task&view_type=form`,
+        sourceRevision: task.write_date,
+        labels: [],
+        requester: null,
+        acceptanceCriteria: [],
+        attachments: [],
+        pluginId: "community.odoo",
+        extensions: {
+          "community.odoo.task": {
+            id: task.id,
+            project: task.project_id ? task.project_id[1] : null,
+            deadline: task.date_deadline || null,
+            customer: task.partner_id ? task.partner_id[1] : null,
+          },
+        },
+      },
+    );
+  }
+  async updateStatus(_input: StatusUpdate): Promise<WriteReceipt> {
+    throw new Error("UNSUPPORTED_CAPABILITY");
+  }
+  async postComment(_input: SourceComment): Promise<WriteReceipt> {
+    throw new Error("UNSUPPORTED_CAPABILITY");
   }
 }
 

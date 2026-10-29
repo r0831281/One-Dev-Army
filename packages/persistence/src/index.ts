@@ -13,6 +13,7 @@ import type {
   WorkflowProjection,
 } from "../../contracts/src/index.js";
 import {
+  plannedFor,
   validateDecisionReceipt,
   validateRunManifest,
   validateStepProjection,
@@ -479,7 +480,7 @@ export class PgWorkflowRepository {
     });
   }
 
-  async get(runId: string, workspaceId:string|null=null): Promise<WorkflowRunRecord | null> {
+  async get(runId: string, workspaceId: string | null = null): Promise<WorkflowRunRecord | null> {
     const result = await this.pool.query<{
       id: string;
       workflow_id: string;
@@ -491,7 +492,7 @@ export class PgWorkflowRepository {
       projection: WorkflowProjection;
     }>(
       "SELECT id,workflow_id,workflow_version,state,state_revision,manifest,manifest_sha256,projection FROM workflow_runs WHERE id=$1 AND ($2::uuid IS NULL OR workspace_id=$2)",
-      [runId,workspaceId],
+      [runId, workspaceId],
     );
     return result.rows[0] ? mapRun(result.rows[0]) : null;
   }
@@ -508,7 +509,7 @@ export class PgWorkflowRepository {
       projection: WorkflowProjection;
     }>(
       "SELECT id,workflow_id,workflow_version,state,state_revision,manifest,manifest_sha256,projection FROM workflow_runs WHERE ($2::uuid IS NULL OR workspace_id=$2) ORDER BY updated_at DESC,id LIMIT $1",
-      [limit,workspaceId],
+      [limit, workspaceId],
     );
     return result.rows.map(mapRun);
   }
@@ -718,12 +719,12 @@ export class MemoryTaskRepository {
   private readonly contexts = new Map<string, TaskContext[]>();
   private readonly deliveries = new Map<string, IngestReceipt>();
   restore(values: TaskContext[]) {
-    for(const value of values) {
-      const context=validateTaskContext(value);
-      const revisions=this.contexts.get(context.taskId) ?? [];
-      if(!revisions.some((r)=>r.revision===context.revision)) revisions.push(structuredClone(context));
-      revisions.sort((a,b)=>a.revision-b.revision);
-      this.contexts.set(context.taskId,revisions);
+    for (const value of values) {
+      const context = validateTaskContext(value);
+      const revisions = this.contexts.get(context.taskId) ?? [];
+      if (!revisions.some((r) => r.revision === context.revision)) revisions.push(structuredClone(context));
+      revisions.sort((a, b) => a.revision - b.revision);
+      this.contexts.set(context.taskId, revisions);
     }
   }
   ingest(contextValue: unknown, deliveryId: string | null = null): IngestReceipt {
@@ -769,16 +770,9 @@ export class MemoryTaskRepository {
       .map((values) => values.at(-1))
       .filter((value): value is TaskContext => Boolean(value))
       .map((context) => {
-        const planning = context.extensions?.["community.jira.planning"] as
-          | { plannedFor?: unknown }
-          | undefined;
-        const plannedFor =
-          typeof planning?.plannedFor === "string" && /^\d{4}-\d{2}-\d{2}$/.test(planning.plannedFor)
-            ? planning.plannedFor
-            : null;
         return structuredClone({
           ...context,
-          plannedFor,
+          plannedFor: plannedFor(context),
           planningRevision: context.revision,
           planningUpdatedAt: context.provenance.fetchedAt,
         });
@@ -860,26 +854,54 @@ export class PgPhase3Repository {
     maxMicrousd: number | null;
     expiresAt: string;
   }): Promise<boolean> {
-    return transaction(this.pool,async(client)=>{
-      const run=await client.query<{workspace_id:string;task_id:string}>("SELECT workspace_id,task_id FROM workflow_runs WHERE id=$1",[value.runId]);
-      const r=run.rows[0];if(!r) throw new Error("RUN_NOT_FOUND");
-      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))",[r.workspace_id]);
-      const existing=await client.query("SELECT operation_id FROM usage_reservations WHERE operation_id=$1",[value.operationId]);
-      if(existing.rows.length) return false;
-      const status=await new WorkspaceOperations(client,r.workspace_id).status(r.task_id);
-      if(value.maxMicrousd===null && status.policy.unpricedPolicy==='block') throw new Error("UNPRICED_USAGE_BLOCKED");
-      if(value.maxMicrousd!==null && (!Number.isSafeInteger(value.maxMicrousd)||value.maxMicrousd<0)) throw new Error("INVALID_RESERVATION");
-      const reservations=await client.query<{pending:number;task:number;own:number}>(`SELECT
+    return transaction(this.pool, async (client) => {
+      const run = await client.query<{ workspace_id: string; task_id: string }>(
+        "SELECT workspace_id,task_id FROM workflow_runs WHERE id=$1",
+        [value.runId],
+      );
+      const r = run.rows[0];
+      if (!r) throw new Error("RUN_NOT_FOUND");
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [r.workspace_id]);
+      const existing = await client.query(
+        "SELECT operation_id FROM usage_reservations WHERE operation_id=$1",
+        [value.operationId],
+      );
+      if (existing.rows.length) return false;
+      const status = await new WorkspaceOperations(client, r.workspace_id).status(r.task_id);
+      if (value.maxMicrousd === null && status.policy.unpricedPolicy === "block")
+        throw new Error("UNPRICED_USAGE_BLOCKED");
+      if (value.maxMicrousd !== null && (!Number.isSafeInteger(value.maxMicrousd) || value.maxMicrousd < 0))
+        throw new Error("INVALID_RESERVATION");
+      const reservations = await client.query<{ pending: number; task: number; own: number }>(
+        `SELECT
         coalesce(sum(u.max_microusd) FILTER(WHERE u.run_id=$3),0)::float8/1000000 AS pending,
         coalesce(sum(u.max_microusd) FILTER(WHERE r.task_id=$2),0)::float8/1000000 AS task,
         greatest(coalesce(sum(u.max_microusd) FILTER(WHERE u.run_id=$3),0),coalesce((SELECT greatest(0,a.reserved_microusd-coalesce((SELECT sum(coalesce(m.amount_microusd,0)+coalesce((SELECT sum(delta_microusd) FROM usage_adjustments WHERE attempt_id=m.attempt_id),0)) FROM model_usage m WHERE m.run_id=$3),0)) FROM run_admissions a WHERE a.run_id=$3),0))::float8/1000000 AS own
-        FROM usage_reservations u JOIN workflow_runs r ON r.id=u.run_id WHERE r.workspace_id=$1 AND r.state NOT IN ('COMPLETED','CANCELLED','FAILED','NEEDS_ATTENTION') AND u.state='RESERVED' AND u.expires_at>now()`,[r.workspace_id,r.task_id,value.runId]);
-      const totals=reservations.rows[0]!;const amount=(value.maxMicrousd ?? 0)/1000000;
-      const micros=(value:number)=>Math.round(value*1000000);
-      if(status.policy.taskLimitUsd!==null && micros(status.task_spent)+micros(totals.task)+micros(amount)>micros(status.policy.taskLimitUsd)) throw new Error("TASK_BUDGET_EXHAUSTED");
-      if(status.policy.dailyLimitUsd!==null && micros(status.spent)+Math.max(0,micros(status.reserved)-micros(totals.own))+micros(totals.pending)+micros(amount)>micros(status.policy.dailyLimitUsd)) throw new Error("DAILY_BUDGET_EXHAUSTED");
-      const result=await client.query("INSERT INTO usage_reservations(operation_id,run_id,max_microusd,state,expires_at) VALUES($1,$2,$3,'RESERVED',$4) ON CONFLICT(operation_id) DO NOTHING",[value.operationId,value.runId,value.maxMicrousd,value.expiresAt]);
-      return result.rowCount===1;
+        FROM usage_reservations u JOIN workflow_runs r ON r.id=u.run_id WHERE r.workspace_id=$1 AND r.state NOT IN ('COMPLETED','CANCELLED','FAILED','NEEDS_ATTENTION') AND u.state='RESERVED' AND u.expires_at>now()`,
+        [r.workspace_id, r.task_id, value.runId],
+      );
+      const totals = reservations.rows[0]!;
+      const amount = (value.maxMicrousd ?? 0) / 1000000;
+      const micros = (value: number) => Math.round(value * 1000000);
+      if (
+        status.policy.taskLimitUsd !== null &&
+        micros(status.task_spent) + micros(totals.task) + micros(amount) > micros(status.policy.taskLimitUsd)
+      )
+        throw new Error("TASK_BUDGET_EXHAUSTED");
+      if (
+        status.policy.dailyLimitUsd !== null &&
+        micros(status.spent) +
+          Math.max(0, micros(status.reserved) - micros(totals.own)) +
+          micros(totals.pending) +
+          micros(amount) >
+          micros(status.policy.dailyLimitUsd)
+      )
+        throw new Error("DAILY_BUDGET_EXHAUSTED");
+      const result = await client.query(
+        "INSERT INTO usage_reservations(operation_id,run_id,max_microusd,state,expires_at) VALUES($1,$2,$3,'RESERVED',$4) ON CONFLICT(operation_id) DO NOTHING",
+        [value.operationId, value.runId, value.maxMicrousd, value.expiresAt],
+      );
+      return result.rowCount === 1;
     });
   }
 
@@ -938,6 +960,16 @@ export class PgPhase3Repository {
       );
       return true;
     });
+  }
+
+  /** Frees reservations whose call never produced usage (the call failed), so retries are not blocked. */
+  async releaseUsage(operationIds: string[]): Promise<number> {
+    if (!operationIds.length) return 0;
+    const result = await this.pool.query(
+      "UPDATE usage_reservations SET state='RELEASED' WHERE operation_id=ANY($1::uuid[]) AND state='RESERVED'",
+      [operationIds],
+    );
+    return result.rowCount ?? 0;
   }
 
   async appendUsageAdjustment(value: {

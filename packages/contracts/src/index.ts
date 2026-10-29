@@ -72,3 +72,33 @@ export function apiError(
 ): ApiError {
   return validateApiError({ error: { code, message, requestId, retryable, details } });
 }
+
+/** Extension keys that carry a planned work date, in precedence order. */
+export const PLANNING_EXTENSIONS = ["community.tempo.planning", "community.jira.planning"] as const;
+
+function isCalendarDate(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^\d{4}-\d{2}-\d{2}$/.test(value) &&
+    Number.isFinite(Date.parse(`${value}T00:00:00Z`)) &&
+    new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value
+  );
+}
+
+/** Returns the customer a task is for: the Odoo partner, else the customer field found on the Jira issue. */
+export function taskCustomer(context: Pick<TaskContext, "extensions">): string | null {
+  for (const key of ["community.odoo.task", "community.jira.customer"]) {
+    const raw = (context.extensions?.[key] as { customer?: unknown } | undefined)?.customer;
+    if (typeof raw === "string" && raw.trim()) return raw.trim();
+  }
+  return null;
+}
+
+/** Returns the planned date of a task context, preferring Tempo planning over the Jira due date. */
+export function plannedFor(context: Pick<TaskContext, "extensions">): string | null {
+  for (const key of PLANNING_EXTENSIONS) {
+    const raw = (context.extensions?.[key] as { plannedFor?: unknown } | undefined)?.plannedFor;
+    if (isCalendarDate(raw)) return raw;
+  }
+  return null;
+}

@@ -1,0 +1,3 @@
+# The repository stores LF, release artifacts hash exact file bytes, and container scripts need LF.
+# Keep LF in every working tree regardless of a global core.autocrlf setting.
+* text=auto eol=lf

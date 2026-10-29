@@ -1,10 +1,20 @@
 import { mountWorkspaceControls } from "./workspace-controls.js";
+import { mountEnvironmentSettings, renderAnalysePanel } from "./environments.js";
+import { renderProfiles } from "./profiles.js";
 import { $, stored, remember, preferences, state, auth, node } from "./core.js";
 import { startGateParticles, stopGateParticles } from "./particles.js";
 import { createDemo } from "./demo.js";
 import { createSettings, settingsState } from "./settings.js";
 import { createTelemetry } from "./telemetry.js";
 mountWorkspaceControls();
+{
+  const dialog = document.getElementById("settings-dialog");
+  if (dialog)
+    mountEnvironmentSettings(dialog.querySelector(".settings-scroll") || dialog, {
+      request: (...args) => request(...args),
+      errorLabel: (error) => analyseErrorLabel(error),
+    });
+}
 let telemetry = null;
 const demo = createDemo({
   selected,
@@ -33,6 +43,10 @@ let executionUpdatedAt = 0;
 let eventCursor = null;
 let eventEpoch = null;
 let liveRefreshing = false;
+let lastLiveCheck = 0;
+// The open "Analyse with agents" panel survives background re-renders of the summary; the first environment scan
+// can take longer than one refresh, and its answer must land in the panel the user sees.
+let analysePanel = null;
 function connection(label, kind) {
   $("connection").textContent = label;
   $("connection").className = `status ${kind}`;
@@ -61,6 +75,35 @@ async function request(path, options = {}) {
     throw error;
   }
 }
+const ANALYSE_ERRORS = {
+  LIVE_AGENTS_NOT_CONFIGURED:
+    "assign Anthropic profiles to the context-reviewer and planner roles in Settings → Agent profiles.",
+  PROFILE_REVISION_CONFLICT:
+    "an assigned agent profile changed while starting. Reload the page and try again.",
+  PROVIDER_UNAVAILABLE: "the assigned profile's credential is not set in the API process.",
+  IDEMPOTENCY_CONFLICT: "a previous start attempt is still recorded. Reload the page and try again.",
+  ENVIRONMENT_NOT_FOUND: "that work environment no longer exists. Rescan environments in Settings.",
+  ENVIRONMENT_BRANCH_NOT_FOUND: "that branch does not exist in the environment's checkout.",
+  DATABASE_NOT_IN_ENVIRONMENT: "that database does not belong to the chosen environment.",
+  CONFIRMATION_REQUIRED: "type the database name exactly to confirm.",
+  BACKUP_PATH_DENIED: "backups must be inside the downloads folder or the environment folder.",
+  RESTORE_ALREADY_RUNNING: "a restore is already running for this environment.",
+  DATABASE_IN_USE: "the database has open connections; stop Odoo or close sessions first.",
+  DATABASE_NOT_SCRATCH: "only codex_, claude_ or oda_ scratch copies can be deleted here.",
+};
+function analyseErrorLabel(error) {
+  const label = ANALYSE_ERRORS[error.code];
+  return label ? `${label} (${error.code})` : error.message;
+}
+/** Odoo partner first, then the customer field found on the Jira issue (mirrors taskCustomer in contracts). */
+function customerOf(task) {
+  return (
+    task?.customer ||
+    task?.extensions?.["community.odoo.task"]?.customer ||
+    task?.extensions?.["community.jira.customer"]?.customer ||
+    null
+  );
+}
 function selected() {
   const direct = state.runs.find((r) => r.runId === state.selected);
   if (direct) return direct;
@@ -74,7 +117,19 @@ function taskForRun(run) {
 }
 function assessmentFor(task = selectedTask(), run = selected()) {
   if (task?.contextAssessment) return task.contextAssessment;
-  if (run && !String(run.projection.state).includes("CONTEXT"))
+  // Only states that follow context review prove acceptance; a cancelled, failed or queued run proves nothing.
+  const pastContext = [
+    "PLANNING",
+    "AWAITING_PLAN",
+    "IMPLEMENTING",
+    "TESTING",
+    "REVIEWING",
+    "AWAITING_FINAL",
+    "REPORTING",
+    "REPORT_PENDING",
+    "COMPLETED",
+  ];
+  if (run && pastContext.includes(run.projection.state))
     return {
       status: "ACCEPTED",
       agent: "Acceptance agent",
@@ -202,7 +257,11 @@ function renderWork() {
           "small",
           `${task.source.key} · ${task.source.provider || "Source"}${task.customer ? ` · ${task.customer}` : ""}`,
         ),
-        node("small", `Planned ${shortDate(task.plannedFor)} · from Jira`, "task-plan-label"),
+        node(
+          "small",
+          `Planned ${shortDate(task.plannedFor)} · ${planningSourceLabel(task)}`,
+          "task-plan-label",
+        ),
         node("small", stateInfo.label, `case-status ${stateInfo.kind}`),
       );
       const eligibility = taskWorkEligibility(task);
@@ -271,6 +330,11 @@ function localDateKey(date) {
   const year = date.getFullYear();
   return `${year}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
+function planningSourceLabel(task) {
+  if (task.extensions?.["community.tempo.planning"]) return "from Tempo";
+  if (task.extensions?.["community.jira.planning"] || task.source?.provider === "Jira") return "from Jira";
+  return "unplanned";
+}
 function renderPlanner() {
   const host = $("week-grid");
   host.replaceChildren();
@@ -285,7 +349,7 @@ function renderPlanner() {
       })
     : "not synced yet";
   $("week-range").textContent =
-    `${monday.toLocaleDateString(undefined, { month: "short", day: "numeric" })}–${friday.toLocaleDateString(undefined, { month: "short", day: "numeric" })} · Jira sync every 30 min · last checked ${syncTime}`;
+    `${monday.toLocaleDateString(undefined, { month: "short", day: "numeric" })}–${friday.toLocaleDateString(undefined, { month: "short", day: "numeric" })} · planning sync every 30 min · last checked ${syncTime}${state.planningSync?.unlinked?.length ? ` · ${state.planningSync.unlinked.length} planned without a task key` : ""}`;
   const today = localDateKey(new Date());
   for (let index = 0; index < 5; index++) {
     const date = new Date(monday);
@@ -313,7 +377,7 @@ function renderPlanner() {
       column.append(item);
     }
     if (!state.tasks.some((candidate) => candidate.plannedFor === key))
-      column.append(node("span", "No Jira-planned work", "day-empty"));
+      column.append(node("span", "No planned work", "day-empty"));
     host.append(column);
   }
 }
@@ -333,8 +397,13 @@ function renderGraph(run = selected()) {
     return;
   }
   const current = run.projection.state || "QUEUED";
+  // A stopped run names the stage it stopped in; only v2 QA failures default to the Test stage.
+  const stoppedIn = { "Context review": 0, Planning: 1 }[run.projection.currentGate?.proposal?.stage];
+  // Live analysis (v3) ends after the approved plan; later stages are not part of the run.
+  const lastStage = run.manifest?.workflowVersion === 3 ? 1 : steps.length - 1;
   const idx =
     run.demoStage ??
+    (["FAILED", "NEEDS_ATTENTION"].includes(current) && stoppedIn !== undefined ? stoppedIn : undefined) ??
     {
       QUEUED: 0,
       CONTEXT_REVIEW: 0,
@@ -353,6 +422,12 @@ function renderGraph(run = selected()) {
     }[current] ??
     0;
   steps.forEach((label, i) => {
+    if (i > lastStage) {
+      const li = node("li", label, "node");
+      li.append(node("small", "Not part of analysis", "muted"));
+      host.append(li);
+      return;
+    }
     const completeRun = current === "COMPLETED";
     const failed = (current === "FAILED" || current === "NEEDS_ATTENTION") && i === idx;
     const waiting = current.startsWith("AWAITING_") && i === idx;
@@ -364,7 +439,7 @@ function renderGraph(run = selected()) {
     li.append(
       node(
         "small",
-        completeRun && i === steps.length - 1
+        completeRun && i === lastStage
           ? "Completed"
           : failed
             ? "Failed · review details"
@@ -380,7 +455,8 @@ function renderGraph(run = selected()) {
         "muted",
       ),
     );
-    if (failed) {
+    // Test evidence exists only once implementation ran; earlier stops are explained by the gate above.
+    if (failed && i >= 2) {
       li.setAttribute("role", "button");
       li.title = "Open failed test evidence and recovery details";
       li.onclick = () => selectInspectorTab("tests", { focus: true });
@@ -419,7 +495,7 @@ function renderSummary(run = selected()) {
   const assessment = assessmentFor(task, run);
   meta.append(
     node("span", task?.source.provider || "Ingested source"),
-    ...(task?.customer ? [node("span", `Customer ${task.customer}`)] : []),
+    ...(customerOf(task) ? [node("span", `Customer ${customerOf(task)}`)] : []),
     node("span", task?.repositoryName || run?.manifest.repository?.id || "Local repository"),
     node(
       "span",
@@ -441,10 +517,21 @@ function renderSummary(run = selected()) {
     const index = run.demoStage ?? 0;
     const stateInfo = runStateInfo(run);
     const progress = node("div", "", "progress-block");
-    progress.append(node("strong", `${stateInfo.label} · stage ${index + 1} of 7`));
+    // An analysis run (v3) has two stages, context review and planning; a completed one ends with the plan.
+    const analysis = run.manifest?.workflowVersion === 3;
+    const stages = analysis ? 2 : 7;
+    const position = analysis && p.state === "COMPLETED" ? stages : Math.min(index + 1, stages);
+    progress.append(
+      node(
+        "strong",
+        analysis && p.state === "COMPLETED"
+          ? "Analysis complete · plan approved"
+          : `${stateInfo.label} · stage ${position} of ${stages}`,
+      ),
+    );
     const track = node("div", "", "progress-track");
     const fill = node("span");
-    fill.style.width = `${((index + 1) / 7) * 100}%`;
+    fill.style.width = `${(position / stages) * 100}%`;
     track.append(fill);
     progress.append(track);
     hero.append(progress);
@@ -458,6 +545,56 @@ function renderSummary(run = selected()) {
     "policy-note",
   );
   host.append(note);
+  if (
+    task &&
+    !state.fixtureMode &&
+    (!run || ["COMPLETED", "CANCELLED", "FAILED"].includes(run.projection.state))
+  ) {
+    const live = settingsState.configuration?.readiness?.liveModelExecution;
+    const analyse = node("div", "", "actions");
+    const planned = run?.projection.state === "COMPLETED" && run.projection.plan;
+    const start = node(
+      "button",
+      run ? "Analyse again with agents" : "Analyse with agents",
+      planned ? "secondary-action" : "approve",
+    );
+    const status = node(
+      "p",
+      planned
+        ? "The plan is approved; it is in the Plan tab below. Analyse again only if the task has changed."
+        : live
+          ? "Claude reviews the task and its repository (read-only), asks questions, then proposes a plan for your approval. Spend counts against your task and daily caps."
+          : "Assign Anthropic profiles to the context-reviewer and planner roles in Settings to enable live analysis.",
+      "muted",
+    );
+    start.disabled = !state.online || !live;
+    const panelKey = `${task.taskId}/${run?.runId ?? "first"}`;
+    const reopened = analysePanel?.key === panelKey;
+    const panelHost = reopened ? analysePanel.host : node("div", "", "analyse-panel-host");
+    start.hidden = status.hidden = reopened;
+    start.onclick = () => {
+      start.hidden = true;
+      status.hidden = true;
+      analysePanel = { key: panelKey, host: panelHost };
+      void renderAnalysePanel(panelHost, task, {
+        request,
+        errorLabel: analyseErrorLabel,
+        // One key per task, previous run and choice, so a double click never starts two runs.
+        idempotencyKey: (body) => {
+          const intent = `oda-analyse/${task.taskId}/${run?.runId ?? "first"}/${JSON.stringify(body)}`;
+          const key = localStorage.getItem(intent) || crypto.randomUUID();
+          localStorage.setItem(intent, key);
+          return key;
+        },
+        onStarted: () => {
+          analysePanel = null;
+          return load(true);
+        },
+      });
+    };
+    analyse.append(start);
+    host.append(analyse, status, panelHost);
+  }
   if (run?.projection.state === "QUEUED") {
     const queued = node("div", "", "actions");
     const waiting = node("p", waitingLabel(task, run), "muted");
@@ -501,6 +638,7 @@ function renderSummary(run = selected()) {
   const eligibility = task && taskWorkEligibility(task);
   if (eligibility) {
     const notStarted = !run || run.projection.state === "QUEUED";
+    const ended = ["COMPLETED", "CANCELLED", "FAILED"].includes(run?.projection.state);
     const explanation = node(
       "p",
       notStarted
@@ -509,10 +647,13 @@ function renderSummary(run = selected()) {
           : eligibility.eligible
             ? `Eligible for agent work through ${eligibility.cutoff}.`
             : `Agent work deferred: ${eligibility.reason === "UNDATED" ? "no planned date" : `planned after ${eligibility.cutoff}`}. The task remains in your backlog.`
-        : "This run has already started and continues independently of the work horizon.",
+        : ended
+          ? `The last run ended ${run.projection.state.toLowerCase()}. A new analysis starts a fresh run.`
+          : "This run has already started and continues independently of the work horizon.",
       "muted",
     );
-    host.append(explanation);
+    // A completed analysis already says where its plan is; the horizon no longer matters for it.
+    if (!(ended && run.projection.state === "COMPLETED" && run.projection.plan)) host.append(explanation);
     if (notStarted && (!eligibility.eligible || eligibility.override)) {
       const reason = document.createElement("input");
       reason.placeholder = "Reason for starting ahead of the horizon";
@@ -769,6 +910,7 @@ function renderGate(run = selected()) {
     return;
   }
   host.hidden = false;
+  if (renderLiveGate(host, run, gate)) return;
   if (gate.kind === "RECOVERY" && gate.proposal?.reason === "QA repair budget exhausted") {
     const proposal = gate.proposal;
     const card = node("section", "", "recovery-card");
@@ -976,6 +1118,150 @@ function renderGate(run = selected()) {
   host.append(actions, editor, decisionGrid);
   requestAnimationFrame(() => startGateParticles(canvas));
 }
+/** Gates of live analysis runs (workflow v3): real questions, real plans and agent failures. */
+/** Steps, acceptance mapping and risks of a plan, as shown at the approval gate and after approval. */
+function planBlocks(plan) {
+  const list = (title, items, ordered = false) => {
+    if (!Array.isArray(items) || !items.length) return null;
+    const block = node("div", "", "decision-block");
+    const listNode = document.createElement(ordered ? "ol" : "ul");
+    for (const item of items) listNode.append(node("li", item));
+    block.append(node("strong", title), listNode);
+    return block;
+  };
+  const steps = node("div", "", "decision-block");
+  steps.append(node("strong", "Steps"));
+  const ordered = document.createElement("ol");
+  for (const step of plan.steps || []) {
+    const item = node("li", "");
+    item.append(node("b", step.title), node("p", step.description));
+    const checks = list("Checks", step.tests);
+    if (checks) item.append(checks);
+    ordered.append(item);
+  }
+  steps.append(ordered);
+  return [steps, list("Acceptance mapping", plan.acceptanceMapping), list("Risks", plan.risks)].filter(
+    Boolean,
+  );
+}
+function renderLiveGate(host, run, gate) {
+  if (run?.manifest?.workflowVersion !== 3) return false;
+  const proposal = gate.proposal || {};
+  const card = node("section", "", "recovery-card live-gate");
+  const list = (title, items, ordered = false) => {
+    if (!Array.isArray(items) || !items.length) return null;
+    const block = node("div", "", "decision-block");
+    const listNode = document.createElement(ordered ? "ol" : "ul");
+    for (const item of items) listNode.append(node("li", item));
+    block.append(node("strong", title), listNode);
+    return block;
+  };
+  const feedback = document.createElement("textarea");
+  feedback.maxLength = 8000;
+  feedback.value = localStorage.getItem(draftKey(gate)) || "";
+  const primary = node("button", "", "approve");
+  const secondary = node("button", "", "reject");
+  const sync = () => {
+    localStorage.setItem(draftKey(gate), feedback.value);
+    primary.disabled = !state.online || state.busy;
+    secondary.disabled = primary.disabled || !feedback.value.trim();
+  };
+  feedback.oninput = sync;
+  if (gate.kind === "CLARIFICATION") {
+    card.append(
+      node("span", "YOUR INPUT · CONTEXT REVIEW", "eyebrow"),
+      node("h2", "The context reviewer has questions"),
+      node(
+        "p",
+        "Answer the questions to have the task reviewed again, or accept the proposed assumptions to continue to planning.",
+      ),
+    );
+    for (const block of [
+      list("Questions", proposal.questions, true),
+      list("Proposed assumptions", proposal.proposedAssumptions),
+      list("Relevant files", proposal.relevantPaths),
+    ])
+      if (block) card.append(block);
+    feedback.placeholder = "Your answers to the questions";
+    feedback.setAttribute("aria-label", "Answers to the context reviewer");
+    primary.textContent = "Accept assumptions and plan";
+    secondary.textContent = "Send answers and review again";
+  } else if (gate.kind === "PLAN_APPROVAL") {
+    card.append(
+      node("span", `YOUR DECISION · PLAN REVISION ${gate.version}`, "eyebrow"),
+      node("h2", proposal.title || "Plan ready for your review"),
+    );
+    card.append(...planBlocks(proposal));
+    card.append(
+      node(
+        "p",
+        "Approving records the plan. Implementation by agents is not enabled yet; you implement from this plan.",
+        "muted",
+      ),
+    );
+    feedback.placeholder = "What should the planner change?";
+    feedback.setAttribute("aria-label", "Plan change request");
+    primary.textContent = "Approve plan";
+    secondary.textContent = "Request changes";
+  } else if (gate.kind === "RECOVERY") {
+    card.append(
+      node("span", "YOUR DECISION · AGENT STOPPED", "eyebrow"),
+      node("h2", proposal.reason || "An agent step needs attention"),
+      node("p", proposal.detail || ""),
+      node(
+        "p",
+        proposal.code === "TASK_BUDGET_EXHAUSTED" || proposal.code === "DAILY_BUDGET_EXHAUSTED"
+          ? "The spending cap was reached. Raise it in Settings before retrying."
+          : "Retrying runs the step again and may spend more.",
+        "muted",
+      ),
+    );
+    feedback.placeholder = "Reason for cancelling this run";
+    feedback.setAttribute("aria-label", "Reason for cancelling the run");
+    primary.textContent = "Retry step";
+    secondary.textContent = "Cancel run";
+  } else return false;
+  primary.onclick = () => decide(run, "APPROVE");
+  secondary.onclick = () => decide(run, "REJECT", feedback.value);
+  sync();
+  const actions = node("div", "", "recovery-actions");
+  actions.append(primary, secondary);
+  if (gate.kind !== "RECOVERY") {
+    // Ending the run frees the task for a new analysis, for example in another work environment.
+    const stop = node("button", "Cancel run", "secondary-action");
+    stop.disabled = !state.online || state.busy;
+    stop.title = "End this run; you can then analyse again in another work environment";
+    stop.onclick = async () => {
+      if (!confirm("Cancel this run? You can then start a new analysis.")) return;
+      stop.disabled = true;
+      try {
+        await cancelRunFromGate(run, feedback.value.trim() || "Cancelled from the dashboard");
+      } catch (error) {
+        stop.disabled = false;
+        alert(`Run was not cancelled: ${error.message}`);
+      }
+    };
+    actions.append(stop);
+  }
+  card.append(feedback, actions);
+  host.append(card);
+  return true;
+}
+async function cancelRunFromGate(run, reason) {
+  if (state.fixtureMode === "demo") {
+    run.projection.state = "CANCELLED";
+    run.projection.currentGate = null;
+    run.projection.stateRevision++;
+    renderAll();
+    return;
+  }
+  await request(`/api/v1/runs/${run.runId}/cancel`, {
+    method: "POST",
+    headers: { "idempotency-key": crypto.randomUUID() },
+    body: JSON.stringify({ expectedStateRevision: run.projection.stateRevision, reason }),
+  });
+  await load(true);
+}
 async function decide(run, decision, reason = "") {
   const gate = run.projection.currentGate;
   if (decision === "REJECT" && !reason.trim()) return alert("Enter a rejection reason.");
@@ -1066,6 +1352,17 @@ function renderInspector() {
       banner.append(copy);
       detail.append(banner);
     }
+    // A finished analysis keeps its approved plan here; it is what you implement from.
+    const approved = run?.manifest?.workflowVersion === 3 ? run.projection?.plan : null;
+    if (approved) {
+      const section = node("section", "", "approved-plan");
+      section.append(
+        node("span", "APPROVED PLAN", "eyebrow"),
+        node("h3", approved.title || "Approved plan"),
+        ...planBlocks(approved),
+      );
+      detail.append(section);
+    }
     detail.append(
       node("h3", "Task context"),
       node("p", task.description || "No description supplied.", "muted"),
@@ -1077,7 +1374,7 @@ function renderInspector() {
     planning.append(
       node("span", "Planning", "eyebrow"),
       node("b", task.plannedFor ? shortDate(task.plannedFor) : "Backlog"),
-      node("p", `Jira context revision ${task.planningRevision || 0} · read-only`, "muted"),
+      node("p", `Source context revision ${task.planningRevision || 0} · read-only`, "muted"),
     );
     grid.append(detail, planning);
     host.append(grid);
@@ -1122,6 +1419,30 @@ function renderInspector() {
   host.append(node("p", panels[tab] || panels.plan));
 }
 async function renderConfiguration(host) {
+  const configuration = settingsState.configuration;
+  if (configuration?.assignments) {
+    // Never redraw under a profile form the person is filling in; saving closes it first.
+    if (host.querySelector(".profile-editor")) return;
+    const advanced = [$("profile-form"), $("assignment-form")].filter(Boolean);
+    renderProfiles(host, configuration, {
+      advanced,
+      save: async (profile, assignments) => {
+        if (state.fixtureMode === "demo") {
+          configuration.profiles.push(profile);
+          if (assignments) configuration.assignments = assignments;
+          remember("oda-demo-configuration", configuration);
+        } else {
+          await request("/api/v1/profiles", { method: "POST", body: JSON.stringify(profile) });
+          if (assignments)
+            await request("/api/v1/assignments", { method: "POST", body: JSON.stringify(assignments) });
+        }
+        host.querySelectorAll(".profile-editor").forEach((form) => form.remove());
+        await settings.refreshWorkspaceConfiguration();
+        renderConfiguration(host);
+      },
+    });
+    return;
+  }
   host.replaceChildren();
   host.append(node("p", "Loading configured agent profiles…", "muted"));
   let profiles;
@@ -1153,11 +1474,7 @@ async function renderConfiguration(host) {
     return;
   }
   host.replaceChildren(
-    node(
-      "p",
-      state.fixtureMode ? "Demo agent profiles · synthetic" : "Configured agent profiles · read-only",
-      "muted",
-    ),
+    node("p", state.fixtureMode ? "Demo agent profiles · synthetic" : "Configured agent profiles", "muted"),
   );
   if (!profiles.length)
     host.append(node("p", "No agent profiles are configured in this workspace.", "muted"));
@@ -1246,8 +1563,20 @@ async function load(background = false) {
   state.planningSync = tasksBody.sync || null;
   state.workHorizon = tasksBody.workHorizon || null;
   state.runs = runsBody.items || [];
+  if (!state.selectedTask && state.runs[0]) state.selectedTask = state.runs[0].manifest.taskId;
   if (!state.selectedTask && state.tasks[0]) state.selectedTask = state.tasks[0].taskId;
-  if (!state.selected && state.runs[0]) state.selected = state.runs[0].runId;
+  // Only ever pair the selected task with one of its own runs, so a gate never shows under another task.
+  if (!state.selected)
+    state.selected = state.runs.find((run) => run.manifest.taskId === state.selectedTask)?.runId || null;
+  // After "Analyse again", follow the task's new run instead of staying on the finished one.
+  const finished = ["COMPLETED", "CANCELLED", "FAILED"];
+  const current = state.runs.find((run) => run.runId === state.selected);
+  if (current && finished.includes(current.projection.state)) {
+    const active = state.runs.find(
+      (run) => run.manifest.taskId === current.manifest.taskId && !finished.includes(run.projection.state),
+    );
+    if (active) state.selected = active.runId;
+  }
   executionUpdatedAt = Date.now();
   if (!background) renderAll();
   else {
@@ -1413,7 +1742,7 @@ async function pollExecution() {
         eventCursor = batch.events.at(-1).seq;
       }
     }
-    $("activity-connection").textContent = "Live · 2s";
+    lastLiveCheck = Date.now();
     $("activity-connection").className = "status online";
   } catch {
     $("activity-connection").textContent = "Updates unavailable";
@@ -1432,7 +1761,14 @@ function updateFreshness() {
   $("connector-freshness").textContent =
     `Connectors: ${age(state.planningSync?.lastCheckedAt)}${state.planningSync?.failed ? ` · ${state.planningSync.failed} failed` : ""}`;
   $("telemetry-freshness").textContent = `Telemetry: ${age(telemetry?.lastSuccess)}`;
+  // Show when updates were last checked, so a quiet run is distinguishable from a stalled page.
+  const badge = $("activity-connection");
+  if (badge?.classList.contains("online") && lastLiveCheck)
+    badge.textContent = `Live · checked ${age(lastLiveCheck)}`;
 }
+setInterval(() => {
+  if (!state.fixtureMode && !document.hidden) updateFreshness();
+}, 1000);
 function renderVisitSummary() {
   if (!previousVisit || visitDismissed || state.fixtureMode) return;
   const changed = state.runs.filter((r) => new Date(r.projection.updatedAt).getTime() > previousVisit.at);

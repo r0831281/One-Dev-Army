@@ -25,6 +25,8 @@ export interface TaskRunWorkflowInput {
   profileBindings?: Record<string, { id: string; revision: number; provider: string; model: string }>;
   continueAsNewAfterTransitions?: number;
   fakeCompletionDelayMs?: number;
+  /** v3 only: local Odoo database the analysis agents may query read-only. */
+  dataSource?: { environmentPath: string; database: string };
   carried?: {
     projection: WorkflowProjection;
     clarification: Clarification | null;

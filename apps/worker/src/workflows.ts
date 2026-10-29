@@ -21,6 +21,7 @@ import type {
 } from "../../../packages/contracts/src/index.js";
 import type { CancelReceipt, CancelRunInput, TaskRunActivities, TaskRunWorkflowInput } from "./types.js";
 import { routeQaFailure } from "./qa-recovery.js";
+import type { LiveActivities } from "./live-activities.js";
 
 export async function TaskRunWorkflowReplayFixture(value: number): Promise<number> {
   if (patched("phase2-compatible-evolution-v2")) return value + 1;
@@ -31,6 +32,13 @@ const activities = proxyActivities<TaskRunActivities>({
   startToCloseTimeout: "30 seconds",
   heartbeatTimeout: "1 second",
   retry: { maximumAttempts: 3, initialInterval: "250 milliseconds", maximumInterval: "5 seconds" },
+});
+
+// Live model calls are paid: never retried by Temporal; failures surface as recovery gates instead.
+const live = proxyActivities<LiveActivities>({
+  startToCloseTimeout: "20 minutes",
+  heartbeatTimeout: "2 minutes",
+  retry: { maximumAttempts: 1 },
 });
 
 export const submitGateDecision = defineUpdate<DecisionReceipt, [GateDecisionInput]>("submitGateDecision");
@@ -198,6 +206,139 @@ export async function TaskRunWorkflow(input: TaskRunWorkflowInput): Promise<Work
     await activities.projectRun(projectionInput());
     return projection;
   };
+
+  // Version 3: live analysis and planning by the assigned model profiles. Checked before the v1/v2 paths,
+  // which stay byte-for-byte unchanged for replay.
+  const runLiveAnalysis = async (): Promise<WorkflowProjection> => {
+    const bindings = input.profileBindings ?? {};
+    const stepInput = (role: "context-reviewer" | "planner", iteration: number, planRevision?: number) => {
+      const binding = bindings[role];
+      return {
+        workspaceId: input.workspaceId,
+        runId: projection.runId,
+        role,
+        binding: { id: binding?.id ?? "", revision: binding?.revision ?? 0 },
+        context: input.context,
+        repositoryRoot: input.repositoryRoot,
+        constraints: projection.constraints,
+        iteration,
+        ...(planRevision === undefined ? {} : { planRevision }),
+        ...(input.dataSource ? { dataSource: input.dataSource } : {}),
+      };
+    };
+    const openAndWait = async (
+      kind: "CLARIFICATION" | "PLAN_APPROVAL" | "RECOVERY",
+      version: number,
+      artifactHash: string,
+      proposal: unknown,
+    ) => {
+      projection = {
+        ...projection,
+        currentGate: {
+          id: uuid4(),
+          version,
+          kind,
+          state: "PENDING",
+          artifactHash,
+          proposal: proposal as Json,
+        },
+      };
+      reservedDecision = null;
+      await activities.openGate(projectionInput());
+      return waitForGate();
+    };
+    const feedback = (decision: GateDecisionInput): Constraint => ({
+      id: `feedback/${decision.idempotencyKey}`,
+      text: decision.reason!,
+      origin: "human-feedback",
+      sourceRef: `gate/${decision.gateId}/version/${decision.expectedGateVersion}`,
+    });
+    /** A failed agent step opens a recovery gate; APPROVE retries the step, REJECT ends the run. */
+    const recover = async (stage: string, failure: { code: string; detail: string }): Promise<boolean> => {
+      advance("NEEDS_ATTENTION");
+      const decision = await openAndWait("RECOVERY", 1, projection.manifestHash, {
+        reason: `${stage} failed: ${failure.code}`,
+        stage,
+        code: failure.code,
+        detail: failure.detail,
+      });
+      return Boolean(decision && !projection.cancelRequested && decision.decision === "APPROVE");
+    };
+
+    let reviewIteration = 0;
+    for (;;) {
+      if (projection.cancelRequested) return finishCancellation();
+      advance("CONTEXT_REVIEW");
+      await activities.projectRun(projectionInput());
+      const reviewed = await live.analyseContext(stepInput("context-reviewer", ++reviewIteration));
+      if (!reviewed.ok) {
+        if (await recover("Context review", reviewed)) continue;
+        return finishCancellation();
+      }
+      clarification = reviewed.output;
+      if (clarification.sufficient) break;
+      advance("AWAITING_CONTEXT");
+      const decision = await openAndWait(
+        "CLARIFICATION",
+        reviewIteration,
+        reviewed.artifactHash,
+        clarification,
+      );
+      if (!decision || projection.cancelRequested) return finishCancellation();
+      if (decision.decision === "REJECT") {
+        // Answers to the questions: review again with them.
+        projection.constraints.push(feedback(decision));
+        continue;
+      }
+      projection.constraints.push(
+        ...clarification.proposedAssumptions.map<Constraint>((text, index) => ({
+          id: `assumption/${decision.idempotencyKey}/${index + 1}`,
+          text,
+          origin: "accepted-assumption",
+          sourceRef: `decision/${decision.idempotencyKey}`,
+        })),
+      );
+      break;
+    }
+
+    let planIteration = 0;
+    for (;;) {
+      if (projection.cancelRequested) return finishCancellation();
+      advance("PLANNING");
+      await activities.projectRun(projectionInput());
+      const planRevision = (projection.plan?.revision ?? 0) + 1;
+      const planned = await live.planTask(stepInput("planner", ++planIteration, planRevision));
+      if (!planned.ok) {
+        if (await recover("Planning", planned)) continue;
+        return finishCancellation();
+      }
+      advance("AWAITING_PLAN");
+      projection = { ...projection, plan: planned.output };
+      const decision = await openAndWait("PLAN_APPROVAL", planRevision, planned.artifactHash, planned.output);
+      if (!decision || projection.cancelRequested) return finishCancellation();
+      if (decision.decision === "APPROVE") break;
+      const used = projection.budget.humanReplansUsed + 1;
+      projection.constraints.push(feedback(decision));
+      projection = { ...projection, budget: { ...projection.budget, humanReplansUsed: used } };
+      if (used >= projection.budget.humanReplansLimit) {
+        if (
+          !(await recover("Planning", { code: "REPLAN_BUDGET_EXHAUSTED", detail: `${used} re-plans used` }))
+        )
+          return finishCancellation();
+        projection = {
+          ...projection,
+          budget: { ...projection.budget, humanReplansLimit: projection.budget.humanReplansLimit + 1 },
+        };
+      }
+    }
+
+    // Phase 1 ends at an approved plan; implementation needs the sandboxed phase 2 backend.
+    advance("COMPLETED");
+    projection = { ...projection, currentGate: null };
+    await activities.projectRun(projectionInput());
+    return projection;
+  };
+  if (input.manifest.workflowVersion === 3) return runLiveAnalysis();
 
   if (!clarification) {
     advance("CONTEXT_REVIEW");

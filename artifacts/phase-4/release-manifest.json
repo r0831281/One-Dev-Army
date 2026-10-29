@@ -1,7 +1,7 @@
 {
   "schemaVersion": "1.0",
   "release": "0.4.0-phase.4",
-  "generatedAt": "2026-10-29T10:57:15.969Z",
+  "generatedAt": "2026-10-29T16:44:44.637Z",
   "localOnly": true,
   "publication": false,
   "migrationHead": 7,
@@ -67,18 +67,18 @@
     },
     {
       "path": "apps/dashboard/index.html",
-      "sha256": "6df2e86b23933a9dc20c2707e34fd68f95cc6e73ef5f376bf76dc9cf59cf2961",
-      "size": 12542
+      "sha256": "1bcc17be440ac2250d35993f98ca8b68720db8a57a778b695dbae0a1f0426332",
+      "size": 12552
     },
     {
       "path": "apps/dashboard/assets.json",
-      "sha256": "b5c2078fc81cdc71adc1e7e6209db66a2a3fd68955f214957170c709d499b77d",
-      "size": 426
+      "sha256": "821ca74820e118665d39688ecefdd3947ed30b7af43a113c7491918cf297ee1c",
+      "size": 534
     },
     {
       "path": "apps/dashboard/dashboard.js",
-      "sha256": "bf56cbd3f269c1fa27e1b9328ce6a05e993b4b861f175fbad29670c5a0e4b087",
-      "size": 57907
+      "sha256": "7c2660522ba8b46466ca24680d8d08f15fe481ac69ffa7dab142d2197ba5a234",
+      "size": 73292
     },
     {
       "path": "apps/dashboard/core.js",
@@ -97,8 +97,8 @@
     },
     {
       "path": "apps/dashboard/settings.js",
-      "sha256": "f3c6dd2f2ed5b7368c4150fd54b2b26eb408f70497dfb83bebd0ff35e82668d0",
-      "size": 14729
+      "sha256": "ce88b2fb1f58763f53a5ea9b4b24dc1b1cedfa2f2cfa45ac0395f334829df171",
+      "size": 18048
     },
     {
       "path": "apps/dashboard/telemetry.js",
@@ -107,8 +107,18 @@
     },
     {
       "path": "apps/dashboard/workspace-controls.js",
-      "sha256": "dfb4463ac9fde392f7d4b751a3d556aa91873fef104b59849b8e4fe70e772d59",
-      "size": 8931
+      "sha256": "bb55135f846fb8a82a1ecc7b05b43a7ecf39e92cd5098cc1a3773090d851cdf9",
+      "size": 11036
+    },
+    {
+      "path": "apps/dashboard/environments.js",
+      "sha256": "e2de3122f54362a989f0824cf884d18449d7dcc871ae5c4bc73163e7d94b76d7",
+      "size": 11576
+    },
+    {
+      "path": "apps/dashboard/profiles.js",
+      "sha256": "a942c1424eccd65308d3fc804a2485aec820662a52ce690bb7c1a7e6c68104f6",
+      "size": 8667
     },
     {
       "path": "apps/dashboard/styles/dashboard.css",
@@ -132,8 +142,8 @@
     },
     {
       "path": "artifacts/phase-4/sbom.cdx.json",
-      "sha256": "83d68d30900b23a881124e84d26189465afb1624ddd2384fd7513a7f5259d26b",
-      "size": 79804
+      "sha256": "0fb6713bf0c9fbeda7e85279f7700f19df28e7483f3f7447cdecc58174b9e61b",
+      "size": 80970
     }
   ]
 }

@@ -220,6 +220,24 @@ export function createSettings({
         `${r.connectors ? "✓" : "○"} Connector configured · ${r.tasksSynced ? "✓" : "○"} Tasks synced · ${r.agentsConfigured ? "✓" : "○"} Agent roles assigned. Execution backend: ${r.executionBackend}${r.liveModelExecution ? "" : " (live models are not enabled)"}${state.fixtureMode ? " · demo" : ""}.`;
       if (!$("connector-form").contains(document.activeElement))
         $("connector-repository-id").replaceChildren(...c.repositories.map((r) => new Option(r.name, r.id)));
+      const repositoryList = $("repository-list");
+      repositoryList.replaceChildren();
+      for (const repository of c.repositories) {
+        const prefixes = repository.task_key_prefixes || [];
+        const button = node(
+          "button",
+          `${repository.name} · ${prefixes.length ? prefixes.join(", ") : "no prefixes (not shown to agents)"}`,
+        );
+        button.type = "button";
+        button.onclick = () => {
+          $("repository-id").value = repository.id;
+          $("repository-name").value = repository.name;
+          $("repository-path").value = repository.local_path;
+          $("repository-branch").value = repository.default_branch || "main";
+          $("repository-prefixes").value = prefixes.join(", ");
+        };
+        repositoryList.append(button);
+      }
       const list = $("connector-list");
       list.replaceChildren();
       for (const connector of c.connectors) {
@@ -275,17 +293,63 @@ export function createSettings({
     };
     for (const [key, id] of Object.entries(mapping)) $("connector-" + id).value = c[key] || "";
     $("connector-enabled").checked = c.enabled;
+    $("connector-tempo-account").value = c.tempo?.accountId || "";
+    $("connector-tempo-credential").value = c.tempo?.credentialEnv || "";
+    $("connector-odoo-version").value = c.odoo?.apiVersion || "jsonrpc";
+    $("connector-odoo-database").value = c.odoo?.database || "";
+    $("connector-odoo-login").value = c.odoo?.login || "";
+    $("connector-odoo-key-field").value = c.odoo?.keyField || "project_key_display";
+    showProviderFields();
   }
+  const providerFields = {
+    github: ["owner", "repo"],
+    jira: ["project", "tempo-account", "tempo-credential"],
+    odoo: ["odoo-version", "odoo-database", "odoo-login", "odoo-key-field"],
+  };
+  function showProviderFields() {
+    const provider = $("connector-provider").value;
+    for (const [owner, ids] of Object.entries(providerFields))
+      for (const id of ids) $("connector-" + id).closest("label").hidden = owner !== provider;
+  }
+  $("repository-new").onclick = () => {
+    $("repository-form").reset();
+    $("repository-id").value = "";
+  };
+  $("repository-form").onsubmit = (event) => {
+    event.preventDefault();
+    void settingsAction(event.currentTarget, "repository-status", async () => {
+      if (state.fixtureMode)
+        throw new Error("Demo only · connect a live workspace to register repositories.");
+      await request("/api/v1/repositories", {
+        method: "POST",
+        body: JSON.stringify({
+          id: $("repository-id").value || undefined,
+          name: $("repository-name").value.trim(),
+          localPath: $("repository-path").value.trim(),
+          defaultBranch: $("repository-branch").value.trim(),
+          keyPrefixes: $("repository-prefixes")
+            .value.split(",")
+            .map((prefix) => prefix.trim().toUpperCase())
+            .filter(Boolean),
+        }),
+      });
+      await refreshWorkspaceConfiguration();
+    });
+  };
   $("connector-new").onclick = () => {
     $("connector-form").reset();
     $("connector-id").value = "";
+    showProviderFields();
   };
   $("connector-provider").onchange = () => {
-    $("connector-origin").value =
-      $("connector-provider").value === "github"
-        ? "https://api.github.com"
-        : "https://your-team.atlassian.net";
+    $("connector-origin").value = {
+      github: "https://api.github.com",
+      jira: "https://your-team.atlassian.net",
+      odoo: "https://customer.example.invalid",
+    }[$("connector-provider").value];
+    showProviderFields();
   };
+  showProviderFields();
   $("connector-form").onsubmit = (event) => {
     event.preventDefault();
     void settingsAction(event.currentTarget, "connector-status", async () => {
@@ -302,6 +366,16 @@ export function createSettings({
         credentialEnv: $("connector-credential").value.trim(),
         enabled: $("connector-enabled").checked,
       };
+      const tempoAccount = $("connector-tempo-account").value.trim();
+      if (c.provider === "jira" && tempoAccount)
+        c.tempo = { accountId: tempoAccount, credentialEnv: $("connector-tempo-credential").value.trim() };
+      if (c.provider === "odoo")
+        c.odoo = {
+          apiVersion: $("connector-odoo-version").value,
+          database: $("connector-odoo-database").value.trim(),
+          login: $("connector-odoo-login").value.trim(),
+          keyField: $("connector-odoo-key-field").value.trim(),
+        };
       if (state.fixtureMode === "demo") {
         settingsState.configuration.connectors = settingsState.configuration.connectors.filter(
           (x) => x.id !== c.id,

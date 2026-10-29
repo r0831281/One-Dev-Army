@@ -183,6 +183,18 @@ test("persisted horizon gates dispatch, rechecks changed planned dates, resumes 
       }),
       /TASK_BUDGET_EXHAUSTED/,
     );
+    // A failed call releases its reservation, so the retry fits in the task budget again.
+    assert.equal(await usage.releaseUsage([operationId]), 1);
+    assert.equal(await usage.releaseUsage([operationId]), 0, "only open reservations are released");
+    assert.equal(
+      await usage.reserveUsage({
+        operationId: randomUUID(),
+        runId: manifest.runId,
+        maxMicrousd: 30000,
+        expiresAt: new Date(Date.now() + 60000).toISOString(),
+      }),
+      true,
+    );
     await control.operations.save({ ...policy, unpricedPolicy: "block" });
     await assert.rejects(
       usage.reserveUsage({
@@ -245,6 +257,63 @@ test("persisted horizon gates dispatch, rechecks changed planned dates, resumes 
       nextConfiguration.saveConnector({ ...snapshot.connectors[0]!, origin: "http://127.0.0.1" }),
       /CONNECTOR_ORIGIN_DENIED/,
     );
+    const odoo = {
+      id: randomUUID(),
+      name: "Odoo test",
+      provider: "odoo" as const,
+      repositoryId: context.repository.id,
+      baseSha: context.repository.baseSha,
+      origin: "https://odoo.example.invalid",
+      owner: "",
+      repository: "",
+      project: "",
+      credentialEnv: "ODA_TEST_ODOO_KEY",
+      enabled: true,
+      odoo: {
+        apiVersion: "jsonrpc" as const,
+        database: "customer",
+        login: "api",
+        keyField: "project_key_display",
+      },
+    };
+    await nextConfiguration.saveConnector(odoo);
+    await assert.rejects(
+      nextConfiguration.saveConnector({ ...odoo, odoo: { ...odoo.odoo, login: "" } }),
+      /INVALID_CONNECTOR_SCOPE/,
+    );
+    await assert.rejects(
+      nextConfiguration.saveConnector({ ...odoo, odoo: { ...odoo.odoo, keyField: "x'; drop" } }),
+      /INVALID_CONNECTOR_SCOPE/,
+    );
+    await assert.rejects(
+      nextConfiguration.saveConnector({ ...odoo, origin: "https://10.0.0.5" }),
+      /CONNECTOR_ORIGIN_DENIED/,
+    );
+    await assert.rejects(
+      nextConfiguration.saveConnector({
+        ...odoo,
+        tempo: { accountId: "acc", credentialEnv: "ODA_TEMPO_AUTH" },
+      }),
+      /INVALID_CONNECTOR_SCOPE/,
+    );
+    const { odoo: _odooOnly, ...shared } = odoo;
+    await nextConfiguration.saveConnector({
+      ...shared,
+      id: randomUUID(),
+      name: "Jira helpdesk",
+      provider: "jira",
+      origin: "https://team.atlassian.net",
+      project: "HELP",
+      credentialEnv: "ODA_TEST_JIRA_AUTH",
+      tempo: { accountId: "557058:abc-123", credentialEnv: "ODA_TEST_TEMPO_AUTH" },
+    });
+    const routed = new Map(dependencies.rules.map((r) => [r.pattern, r.matchKind]));
+    assert.equal(routed.get("HELP-"), "prefix");
+    assert.equal(routed.get("^[A-Z][A-Z0-9-]*-[1-9][0-9]*$"), "regex");
+    assert.equal(dependencies.planningSources?.length, 1);
+    const stored = (await nextConfiguration.snapshot()).connectors;
+    assert.equal(stored.find((c) => c.provider === "jira")?.odoo, undefined);
+    assert.equal(stored.find((c) => c.provider === "odoo")?.odoo?.login, "api");
   } finally {
     await db.close();
   }
