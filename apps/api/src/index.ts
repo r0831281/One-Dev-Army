@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { apiError, type TaskContext } from "../../../packages/contracts/src/index.js";
+import { apiError, taskCustomer, type TaskContext } from "../../../packages/contracts/src/index.js";
 import {
   TEMPO_PLANNING_EXTENSION,
   verifyWebhook,
@@ -531,9 +531,6 @@ export function createLocalApi(options: ApiOptions) {
           if (request.method === "GET" && analyseMatch[2]) {
             const environments = options.environments ? await options.environments.list() : [];
             const mapped = await options.configuration.resolveRepository(context.source.key);
-            const extension = context.extensions?.["community.odoo.task"] as
-              | { customer?: string | null }
-              | undefined;
             return json(response, 200, {
               environments: environments.map((env) => ({
                 id: env.id,
@@ -546,7 +543,12 @@ export function createLocalApi(options: ApiOptions) {
                 usable: Boolean(env.gitRoot && env.defaultBranch),
               })),
               suggestion: suggestEnvironment(
-                { key: context.source.key, customer: extension?.customer ?? null, title: context.title },
+                {
+                  key: context.source.key,
+                  customer: taskCustomer(context),
+                  title: context.title,
+                  description: context.description,
+                },
                 environments,
                 mapped ? await options.configuration.repositoryPath(mapped.id) : null,
               ),

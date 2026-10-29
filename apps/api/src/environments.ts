@@ -255,7 +255,7 @@ const tokens = (value: string) =>
  * tokens) of the customer name or title; substrings never match ("Parkside" is not "ark").
  */
 export function suggestEnvironment(
-  task: { key: string; customer: string | null; title: string },
+  task: { key: string; customer: string | null; title: string; description?: string | null },
   environments: Array<Pick<WorkEnvironment, "id" | "version" | "customer" | "gitRoot">>,
   mappedGitRoot: string | null = null,
 ): EnvironmentSuggestion {
@@ -273,9 +273,15 @@ export function suggestEnvironment(
     if (first.length >= 3 && first !== full && (words.includes(first) || joined.includes(first))) return 2;
     return 0;
   };
-  const candidates = environments
+  let candidates = environments
     .map((env) => ({ env, score: Math.max(score(env, task.customer) * 2, score(env, task.title)) }))
     .filter((c) => c.score > 0);
+  // Helpdesk tickets often name the customer only in the body; that is a weaker signal, so it is a fallback.
+  const fromDescription = !candidates.length;
+  if (fromDescription)
+    candidates = environments
+      .map((env) => ({ env, score: Math.min(score(env, task.description ?? null), 1) }))
+      .filter((c) => c.score > 0);
   if (!candidates.length)
     return { environmentId: null, confidence: "none", reason: "No environment matches" };
   const best = Math.max(...candidates.map((c) => c.score));
@@ -297,7 +303,7 @@ export function suggestEnvironment(
     reason:
       top.length > 1
         ? `Newest of ${top.map((c) => c.env.id).join(", ")}`
-        : `Matches "${newest.env.customer}"`,
+        : `${fromDescription ? "Description mentions" : "Matches"} "${newest.env.customer}"`,
   };
 }
 

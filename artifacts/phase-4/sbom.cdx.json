@@ -1,10 +1,10 @@
 {
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:62abd630-d106-4eb6-b010-e7454008b016",
+  "serialNumber": "urn:uuid:7e1f4222-1e6e-4ee6-9cdc-90fb1d545598",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-10-29T15:51:59.912Z",
+    "timestamp": "2026-10-29T16:44:44.629Z",
     "component": {
       "type": "application",
       "name": "one-developer-army",

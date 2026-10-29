@@ -19,6 +19,7 @@ import {
   ANTHROPIC_PRICING,
   anthropicUsage,
   costMicrousd,
+  worstCaseMicrousd,
   type ModelPricing,
   type ModelTurn,
 } from "../../../packages/providers/src/anthropic.js";
@@ -74,7 +75,9 @@ const ROLE_GUIDANCE: Record<LiveRole, { practices: string[]; style: string[]; to
   "context-reviewer": {
     practices: [
       "Tasks are Odoo customer work; the repository holds Odoo addons. Locate the modules, models, views and reports the task touches before judging it.",
-      "Ask only questions whose answer changes the implementation; propose explicit assumptions for everything else.",
+      "Investigate before asking. Never ask something the repository, the database or Odoo's standard behaviour can answer (which module, which field, current format, printer flow); look it up and cite it.",
+      "Ask only what the requester alone can decide, such as business choices with no sensible default or a missing attachment, and only when the answer changes the implementation. Ask at most five questions, most important first.",
+      "Turn everything else into a proposedAssumption with a concrete default an experienced Odoo developer would pick (for example: keep the existing printer and label stock, use the delivery address, ISO country name in the partner's language, wrap long lines). The requester can correct an assumption cheaply.",
       "The repository is the customer's staging checkout for one Odoo version. If the task may target another version or checkout (for example an upgrade project prepared next to the current version, or a feature branch), ask which one instead of assuming.",
     ],
     style: [
@@ -95,6 +98,30 @@ const ROLE_GUIDANCE: Record<LiveRole, { practices: string[]; style: string[]; to
     tools: ["Read the code a step changes before planning it."],
   },
 };
+
+/**
+ * A short, secret-free description of an unexpected failure. Anthropic API errors carry an HTTP status, a
+ * request id and the API's own message, which never includes the key; anything else keeps only its class and
+ * first line, with credentials in connection strings masked.
+ */
+export function describeModelError(error: unknown): string {
+  const value = error as {
+    status?: unknown;
+    requestID?: unknown;
+    request_id?: unknown;
+    message?: unknown;
+    name?: unknown;
+  };
+  const message = String(value?.message ?? "")
+    .split("\n")[0]!
+    .replace(/(\w+:\/\/)[^@\s/]+@/g, "$1***@")
+    .replace(/sk-ant-[\w-]+/g, "sk-ant-***")
+    .slice(0, 500);
+  const requestId = value?.requestID ?? value?.request_id;
+  if (typeof value?.status === "number")
+    return `Anthropic API ${value.status}${requestId ? ` (request ${String(requestId)})` : ""}: ${message}`;
+  return `${String(value?.name ?? "Error")}: ${message || "no message"}`;
+}
 
 async function loadSoul(role: LiveRole, outputSchemaRef: string): Promise<SoulSpec> {
   const roles = JSON.parse(
@@ -164,7 +191,7 @@ export function createLiveActivities(pool: Pool, deps: LiveDependencies): LiveAc
     const task = renderTask(input.context, input.constraints, [
       reader
         ? `REPOSITORY\nPinned base commit ${input.context.repository.baseSha}. Use the repository tools to inspect it.`
-        : "REPOSITORY\nNo repository is mapped to this task; work from the task text only and say what you could not verify.",
+        : "REPOSITORY\nNo repository was selected for this run, so the code cannot be inspected. Do not ask the requester where the code lives or how it currently works; record what you could not verify as assumptions and limit questions to requirements.",
       db
         ? `DATABASE\nA local copy of the customer's database (${input.dataSource!.database}) is available read-only through db_query.`
         : "",
@@ -189,6 +216,8 @@ export function createLiveActivities(pool: Pool, deps: LiveDependencies): LiveAc
     });
 
     let spent = 0;
+    // Reservations of calls that have not produced usage yet; released if the step fails.
+    const openReservations = new Set<string>();
     let priced = true;
     const operationId = (call: number) => uuidFromHash(`model-call/${stepId}/${call}`);
     // A single model turn can take minutes; keep the activity alive while it runs.
@@ -212,9 +241,10 @@ export function createLiveActivities(pool: Pool, deps: LiveDependencies): LiveAc
         hooks: {
           async beforeCall(call) {
             // Worst case for one call: full output plus a generous input allowance, priced at list rates.
-            const maxMicrousd = Math.ceil(
-              profile.limits.maxOutputTokens * pricing.outputPerMTok +
-                profile.limits.maxInputTokens * pricing.inputPerMTok,
+            const maxMicrousd = worstCaseMicrousd(
+              pricing,
+              profile.limits.maxInputTokens,
+              profile.limits.maxOutputTokens,
             );
             await phase3.reserveUsage({
               operationId: operationId(call),
@@ -222,6 +252,7 @@ export function createLiveActivities(pool: Pool, deps: LiveDependencies): LiveAc
               maxMicrousd,
               expiresAt: new Date(Date.now() + profile.limits.timeoutMs + 60_000).toISOString(),
             });
+            openReservations.add(operationId(call));
           },
           async afterCall(call, message) {
             const usage = anthropicUsage(message);
@@ -254,6 +285,7 @@ export function createLiveActivities(pool: Pool, deps: LiveDependencies): LiveAc
               },
               observedAt: new Date().toISOString(),
             });
+            openReservations.delete(operationId(call));
             await project("RUNNING", { calls: call + 1, costMicrousd: priced ? spent : null });
           },
           heartbeat(detail) {
@@ -277,8 +309,10 @@ export function createLiveActivities(pool: Pool, deps: LiveDependencies): LiveAc
           : /^[A-Z][A-Z0-9_]{0,80}$/.test((error as Error).message)
             ? (error as Error).message
             : "AGENT_FAILED";
-      const detail = error instanceof AgentFailure ? error.detail : "The model call failed; see worker logs.";
-      if (!(error instanceof AgentFailure)) console.error("LIVE_AGENT_FAILED", code, (error as Error).name);
+      const detail = error instanceof AgentFailure ? error.detail : describeModelError(error);
+      if (!(error instanceof AgentFailure)) console.error("LIVE_AGENT_FAILED", code, detail);
+      // A call that threw recorded no usage; holding its worst-case reservation would block the retry.
+      await phase3.releaseUsage([...openReservations]);
       await project("FAILED", { code, detail, costMicrousd: priced ? spent : null });
       return { ok: false, code, detail };
     } finally {

@@ -4,8 +4,10 @@ import type Anthropic from "@anthropic-ai/sdk";
 import {
   ANTHROPIC_PRICING,
   anthropicFinishReason,
+  anthropicModelTurn,
   anthropicUsage,
   costMicrousd,
+  worstCaseMicrousd,
   type ModelTurn,
   type ModelTurnInput,
 } from "../packages/providers/src/anthropic.js";
@@ -279,4 +281,71 @@ test("db_query is offered only with a data source and its results are labelled u
   assert.deepEqual(queries, ["SELECT name FROM res_company"]);
   const result = (withDb.inputs[1]!.messages.at(-1)!.content as Anthropic.ToolResultBlockParam[])[0]!;
   assert.match(String(result.content), /^UNTRUSTED DATABASE CONTENT/);
+});
+
+test("unexpected model failures are described without secrets", async () => {
+  const { describeModelError } = await import("../apps/worker/src/live-activities.js");
+  const api = Object.assign(new Error("400 tools.0: invalid schema\nsecond line"), {
+    status: 400,
+    requestID: "req_123",
+  });
+  assert.equal(describeModelError(api), "Anthropic API 400 (request req_123): 400 tools.0: invalid schema");
+  assert.equal(
+    describeModelError(new TypeError("connect postgres://oda:hunter2@127.0.0.1:5433/db failed sk-ant-abc")),
+    "TypeError: connect postgres://***@127.0.0.1:5433/db failed sk-ant-***",
+  );
+});
+
+test("Haiku 5.5 uses its long-prompt rate card above 100K input tokens", () => {
+  const haiku = ANTHROPIC_PRICING["claude-haiku-5-5"]!;
+  const base = { reasoningTokens: null, source: "reported" as const };
+  // 10K in + 2K out + 50K cache read: 10000 × 0.1 + 2000 × 0.5 + 50000 × 0.01 = 2500 micro-USD.
+  assert.equal(
+    costMicrousd(
+      { ...base, inputTokens: 10_000, outputTokens: 2_000, cacheReadTokens: 50_000, cacheWriteTokens: 0 },
+      haiku,
+    ),
+    2500,
+  );
+  // 120K prompt: 120000 × 0.5 + 2000 × 2.5 = 65000 micro-USD.
+  assert.equal(
+    costMicrousd(
+      { ...base, inputTokens: 120_000, outputTokens: 2_000, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      haiku,
+    ),
+    65000,
+  );
+  // Worst case bills input at the cache-write rate: 60000 × 0.125 + 8000 × 0.5 = 11500.
+  assert.equal(worstCaseMicrousd(haiku, 60_000, 8_000), 11500);
+  assert.equal(worstCaseMicrousd(ANTHROPIC_PRICING["claude-opus-5-5"]!, 60_000, 16_000), 620000);
+});
+
+test("the transport caches the conversation and sends fallbacks only where supported", async () => {
+  const sent: Array<Record<string, unknown>> = [];
+  const client = {
+    beta: {
+      messages: {
+        stream: (params: Record<string, unknown>) => {
+          sent.push(params);
+          return { finalMessage: async () => ({}) };
+        },
+      },
+    },
+  } as unknown as Pick<Anthropic, "beta">;
+  const turn = anthropicModelTurn(client);
+  const input = {
+    system: "s",
+    messages: [],
+    tools: [],
+    effort: "low" as const,
+    maxTokens: 10,
+    timeoutMs: 1000,
+  };
+  await turn({ ...input, model: "claude-sonnet-5-5" });
+  await turn({ ...input, model: "claude-haiku-5-5" });
+  assert.deepEqual(sent[0]!.cache_control, { type: "ephemeral" });
+  assert.equal(sent[0]!.fallbacks, "default");
+  assert.deepEqual(sent[1]!.cache_control, { type: "ephemeral" });
+  assert.equal("fallbacks" in sent[1]!, false);
+  assert.equal("betas" in sent[1]!, false);
 });

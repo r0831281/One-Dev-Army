@@ -183,6 +183,18 @@ test("persisted horizon gates dispatch, rechecks changed planned dates, resumes 
       }),
       /TASK_BUDGET_EXHAUSTED/,
     );
+    // A failed call releases its reservation, so the retry fits in the task budget again.
+    assert.equal(await usage.releaseUsage([operationId]), 1);
+    assert.equal(await usage.releaseUsage([operationId]), 0, "only open reservations are released");
+    assert.equal(
+      await usage.reserveUsage({
+        operationId: randomUUID(),
+        runId: manifest.runId,
+        maxMicrousd: 30000,
+        expiresAt: new Date(Date.now() + 60000).toISOString(),
+      }),
+      true,
+    );
     await control.operations.save({ ...policy, unpricedPolicy: "block" });
     await assert.rejects(
       usage.reserveUsage({

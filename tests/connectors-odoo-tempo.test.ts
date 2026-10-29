@@ -5,6 +5,7 @@ import {
   ODOO_TASK_KEY_ROUTE,
   OdooConnector,
   htmlText,
+  jiraCustomer,
   type ConnectorContext,
   type ScopedHttp,
 } from "../packages/connectors/src/index.js";
@@ -16,7 +17,7 @@ import {
   collectPlanning,
 } from "../packages/connectors/src/tempo.js";
 import { resolveRoute, type RoutingRule } from "../packages/routing/src/index.js";
-import { plannedFor } from "../packages/contracts/src/index.js";
+import { plannedFor, taskCustomer } from "../packages/contracts/src/index.js";
 import { MemoryTaskRepository } from "../packages/persistence/src/index.js";
 import { IngestionService } from "../apps/api/src/index.js";
 
@@ -407,4 +408,31 @@ test("Jira lookup falls back to single issues when JQL rejects a hidden id", asy
   const resolved = await resolveJiraIssues(jira, JIRA, ["101", "102"]);
   assert.deepEqual([...resolved.keys()], ["101"]);
   assert.equal(calls.filter((url) => url.includes("/rest/api/3/issue/")).length, 2);
+});
+
+test("the Jira customer comes from organizations, a customer field or the Tempo account, in that order", () => {
+  const names = { customfield_1: "Account", customfield_2: "Organizations", customfield_3: "Klant" };
+  assert.deepEqual(
+    jiraCustomer(
+      { customfield_1: { id: 4, value: "Framaz Account" }, customfield_2: [{ id: "9", name: "Framaz NV" }] },
+      names,
+    ),
+    { customer: "Framaz NV", field: "Organizations" },
+  );
+  assert.deepEqual(jiraCustomer({ customfield_3: { value: "Ark" } }, names), {
+    customer: "Ark",
+    field: "Klant",
+  });
+  assert.deepEqual(jiraCustomer({ customfield_1: { value: "Nordwind" } }, names), {
+    customer: "Nordwind",
+    field: "Account",
+  });
+  assert.equal(jiraCustomer({ customfield_2: [] }, names), null);
+  assert.equal(jiraCustomer({ customfield_2: [{ name: "X" }] }), null, "no names, no guess");
+  assert.equal(
+    taskCustomer({
+      extensions: { "community.jira.customer": { customer: "Framaz NV", field: "Organizations" } },
+    }),
+    "Framaz NV",
+  );
 });

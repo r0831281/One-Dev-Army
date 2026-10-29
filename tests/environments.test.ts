@@ -93,6 +93,20 @@ test("tasks match environments on whole customer tokens, prefer hinted versions 
     "odoo-19-zentaro-staging",
     "a mapping overrides",
   );
+  const fromBody = suggestEnvironment(
+    { key: "HELP-7", customer: null, title: "Label aanpassen", description: "Zelfde formaat als Ark (zpl)" },
+    envs,
+  );
+  assert.equal(fromBody.environmentId, "odoo-19-ark", "the description is a fallback");
+  assert.equal(fromBody.confidence, "low");
+  assert.equal(
+    suggestEnvironment(
+      { key: "HELP-7", customer: null, title: "Nordwind", description: "zoals bij Ark" },
+      envs,
+    ).environmentId,
+    "odoo-19-nordwind",
+    "the title outranks the description",
+  );
   assert.equal(
     suggestEnvironment({ key: "NOR17-4", customer: "Nordwind", title: "x" }, envs).environmentId,
     "odoo-17-nordwind",

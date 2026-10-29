@@ -291,6 +291,33 @@ interface JiraIssue {
     reporter: { accountId: string; displayName: string } | null;
   };
 }
+/** Field names that hold the customer, most specific first: JSM organizations, a custom customer field, Tempo account. */
+const JIRA_CUSTOMER_FIELDS = [
+  /^organi[sz]ations?$/i,
+  /^(customer|klant|client)( name)?$/i,
+  /^(tempo )?account$/i,
+];
+function jiraFieldLabel(value: unknown): string | null {
+  if (typeof value === "string") return value.trim() || null;
+  if (Array.isArray(value)) return value.map(jiraFieldLabel).find(Boolean) ?? null;
+  if (value && typeof value === "object") {
+    const record = value as { name?: unknown; value?: unknown; displayName?: unknown };
+    return jiraFieldLabel(record.name ?? record.value ?? record.displayName ?? null);
+  }
+  return null;
+}
+export function jiraCustomer(
+  fields: Record<string, unknown>,
+  names: Record<string, string> = {},
+): { customer: string; field: string } | null {
+  for (const pattern of JIRA_CUSTOMER_FIELDS)
+    for (const [id, name] of Object.entries(names)) {
+      if (!pattern.test(name.trim())) continue;
+      const customer = jiraFieldLabel(fields[id]);
+      if (customer) return { customer, field: name };
+    }
+  return null;
+}
 interface JiraComment {
   id: string;
   body: unknown;
@@ -319,11 +346,12 @@ export class JiraConnector implements TaskConnector {
     return { externalId: key, key };
   }
   async fetchTask(ref: SourceRef, context: ConnectorContext): Promise<TaskContext> {
-    const issue = await this.http.request<JiraIssue>({
+    const issue = await this.http.request<JiraIssue & { names?: Record<string, string> }>({
       method: "GET",
-      url: `${this.origin}/rest/api/3/issue/${encodeURIComponent(ref.key)}`,
+      url: `${this.origin}/rest/api/3/issue/${encodeURIComponent(ref.key)}?expand=names`,
     });
     if (issue.fields.project.key !== this.projectKey) throw new Error("POLICY_DENIED");
+    const customer = jiraCustomer(issue.fields, issue.names);
     const planningValue = issue.fields[this.planningField];
     const plannedFor =
       typeof planningValue === "string" && /^\d{4}-\d{2}-\d{2}$/.test(planningValue) ? planningValue : null;
@@ -334,7 +362,10 @@ export class JiraConnector implements TaskConnector {
         title: issue.fields.summary,
         description: adfText(issue.fields.description).trim(),
         url: `${this.origin}/browse/${encodeURIComponent(issue.key)}`,
-        sourceRevision: issue.fields.updated,
+        // The customer is derived, not edited, so it is part of the revision key like Tempo planning.
+        sourceRevision: customer
+          ? `${issue.fields.updated}|customer:${createHash("sha256").update(JSON.stringify(customer)).digest("hex").slice(0, 16)}`
+          : issue.fields.updated,
         labels: issue.fields.labels,
         requester: issue.fields.reporter
           ? { id: issue.fields.reporter.accountId, displayName: issue.fields.reporter.displayName }
@@ -347,6 +378,7 @@ export class JiraConnector implements TaskConnector {
             plannedFor,
             field: this.planningField,
           },
+          ...(customer ? { "community.jira.customer": customer } : {}),
         },
       },
     );

@@ -31,8 +31,11 @@ export function anthropicModelTurn(client: Pick<Anthropic, "beta">): ModelTurn {
           effort: input.effort,
           ...(input.outputSchema ? { format: { type: "json_schema", schema: input.outputSchema } } : {}),
         },
-        betas: ["server-side-fallback-2026-07-01"],
-        fallbacks: "default",
+        // The loop re-sends the whole conversation each turn; caching makes the repeated prefix 0.1x input.
+        cache_control: { type: "ephemeral" },
+        ...(NO_SERVER_FALLBACK.test(input.model)
+          ? {}
+          : { betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" as const }),
       },
       { timeout: input.timeoutMs, ...(input.signal ? { signal: input.signal } : {}) },
     );
@@ -79,6 +82,11 @@ export interface ModelPricing {
   outputPerMTok: number;
   cacheReadPerMTok: number;
   cacheWritePerMTok: number;
+  /** A second rate card for prompts longer than `aboveInputTokens` (input incl. cache reads and writes). */
+  longPrompt?: { aboveInputTokens: number } & Pick<
+    ModelPricing,
+    "inputPerMTok" | "outputPerMTok" | "cacheReadPerMTok" | "cacheWritePerMTok"
+  >;
 }
 export const ANTHROPIC_PRICING: Record<string, ModelPricing> = {
   "claude-opus-5-5": {
@@ -97,17 +105,58 @@ export const ANTHROPIC_PRICING: Record<string, ModelPricing> = {
     cacheReadPerMTok: 0.2,
     cacheWritePerMTok: 2.5,
   },
+  // Cache reads are 0.1x and 5-minute cache writes 1.25x the input rate of the applicable card.
+  "claude-haiku-5-5": {
+    snapshotId: "anthropic-2026-10-06-claude-haiku-5-5",
+    model: "claude-haiku-5-5",
+    inputPerMTok: 0.1,
+    outputPerMTok: 0.5,
+    cacheReadPerMTok: 0.01,
+    cacheWritePerMTok: 0.125,
+    longPrompt: {
+      aboveInputTokens: 100_000,
+      inputPerMTok: 0.5,
+      outputPerMTok: 2.5,
+      cacheReadPerMTok: 0.05,
+      cacheWritePerMTok: 0.625,
+    },
+  },
 };
+
+/** Models without a server-side refusal fallback; sending `fallbacks` to them is pointless or a 400. */
+const NO_SERVER_FALLBACK = /^claude-haiku-/;
+
+/** The rate card for a prompt of this many input tokens (including cache reads and writes). */
+function rateCard(pricing: ModelPricing, promptTokens: number) {
+  return pricing.longPrompt && promptTokens > pricing.longPrompt.aboveInputTokens
+    ? pricing.longPrompt
+    : pricing;
+}
+
+/** Worst-case cost in micro-USD of one call: all input billed at the dearer of input and cache-write rates. */
+export function worstCaseMicrousd(
+  pricing: ModelPricing,
+  maxInputTokens: number,
+  maxOutputTokens: number,
+): number {
+  const card = rateCard(pricing, maxInputTokens);
+  const inputRate = Math.max(card.inputPerMTok, card.cacheWritePerMTok);
+  return Math.ceil(maxOutputTokens * card.outputPerMTok + maxInputTokens * inputRate);
+}
 
 /** Cost in micro-USD; null when any counted category is unknown. */
 export function costMicrousd(usage: NormalizedUsage, pricing: ModelPricing): number | null {
-  const parts: Array<[number | null, number]> = [
-    [usage.inputTokens, pricing.inputPerMTok],
-    [usage.outputTokens, pricing.outputPerMTok],
-    [usage.cacheReadTokens ?? 0, pricing.cacheReadPerMTok],
-    [usage.cacheWriteTokens ?? 0, pricing.cacheWritePerMTok],
+  if (usage.inputTokens === null || usage.outputTokens === null) return null;
+  const card = rateCard(
+    pricing,
+    usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0),
+  );
+  const parts: Array<[number, number]> = [
+    [usage.inputTokens, card.inputPerMTok],
+    [usage.outputTokens, card.outputPerMTok],
+    [usage.cacheReadTokens ?? 0, card.cacheReadPerMTok],
+    [usage.cacheWriteTokens ?? 0, card.cacheWritePerMTok],
   ];
-  if (parts.some(([tokens]) => tokens === null)) return null;
   // tokens × USD/MTok equals micro-USD exactly.
-  return Math.ceil(parts.reduce((sum, [tokens, price]) => sum + (tokens as number) * price, 0));
+  return Math.ceil(parts.reduce((sum, [tokens, price]) => sum + tokens * price, 0));
 }

@@ -85,6 +85,15 @@ function isCalendarDate(value: unknown): value is string {
   );
 }
 
+/** Returns the customer a task is for: the Odoo partner, else the customer field found on the Jira issue. */
+export function taskCustomer(context: Pick<TaskContext, "extensions">): string | null {
+  for (const key of ["community.odoo.task", "community.jira.customer"]) {
+    const raw = (context.extensions?.[key] as { customer?: unknown } | undefined)?.customer;
+    if (typeof raw === "string" && raw.trim()) return raw.trim();
+  }
+  return null;
+}
+
 /** Returns the planned date of a task context, preferring Tempo planning over the Jira due date. */
 export function plannedFor(context: Pick<TaskContext, "extensions">): string | null {
   for (const key of PLANNING_EXTENSIONS) {
