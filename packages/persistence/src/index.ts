@@ -13,6 +13,7 @@ import type {
   WorkflowProjection,
 } from "../../contracts/src/index.js";
 import {
+  plannedFor,
   validateDecisionReceipt,
   validateRunManifest,
   validateStepProjection,
@@ -769,16 +770,9 @@ export class MemoryTaskRepository {
       .map((values) => values.at(-1))
       .filter((value): value is TaskContext => Boolean(value))
       .map((context) => {
-        const planning = context.extensions?.["community.jira.planning"] as
-          | { plannedFor?: unknown }
-          | undefined;
-        const plannedFor =
-          typeof planning?.plannedFor === "string" && /^\d{4}-\d{2}-\d{2}$/.test(planning.plannedFor)
-            ? planning.plannedFor
-            : null;
         return structuredClone({
           ...context,
-          plannedFor,
+          plannedFor: plannedFor(context),
           planningRevision: context.revision,
           planningUpdatedAt: context.provenance.fetchedAt,
         });

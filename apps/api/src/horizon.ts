@@ -1,4 +1,4 @@
-import type { TaskContext } from "../../../packages/contracts/src/index.js";
+import { plannedFor as plannedForOf, type TaskContext } from "../../../packages/contracts/src/index.js";
 import type { Queryable } from "../../../packages/persistence/src/index.js";
 
 export interface HorizonSettings {
@@ -22,12 +22,8 @@ export function validateHorizon(value: HorizonSettings): HorizonSettings {
   }
   return { days: value.days, timezone: value.timezone };
 }
-export function horizonEligibility(
-  context: Pick<TaskContext, "extensions">,
-  settings: HorizonSettings,
-  override = false,
-  now = new Date(),
-) {
+/** Today and the horizon cutoff as calendar dates in the workspace timezone. */
+export function horizonWindow(settings: HorizonSettings, now = new Date()): { from: string; to: string } {
   validateHorizon(settings);
   const parts = new Intl.DateTimeFormat("en", {
     timeZone: settings.timezone,
@@ -36,18 +32,19 @@ export function horizonEligibility(
     day: "2-digit",
   }).formatToParts(now);
   const part = (key: string) => parts.find((p) => p.type === key)!.value;
-  const cutoffDate = new Date(`${part("year")}-${part("month")}-${part("day")}T00:00:00Z`);
+  const from = `${part("year")}-${part("month")}-${part("day")}`;
+  const cutoffDate = new Date(`${from}T00:00:00Z`);
   cutoffDate.setUTCDate(cutoffDate.getUTCDate() + settings.days);
-  const cutoff = cutoffDate.toISOString().slice(0, 10);
-  const planning = context.extensions?.["community.jira.planning"] as { plannedFor?: unknown } | undefined;
-  const raw = planning?.plannedFor;
-  const plannedFor =
-    typeof raw === "string" &&
-    /^\d{4}-\d{2}-\d{2}$/.test(raw) &&
-    Number.isFinite(Date.parse(`${raw}T00:00:00Z`)) &&
-    new Date(`${raw}T00:00:00Z`).toISOString().slice(0, 10) === raw
-      ? raw
-      : null;
+  return { from, to: cutoffDate.toISOString().slice(0, 10) };
+}
+export function horizonEligibility(
+  context: Pick<TaskContext, "extensions">,
+  settings: HorizonSettings,
+  override = false,
+  now = new Date(),
+) {
+  const { to: cutoff } = horizonWindow(settings, now);
+  const plannedFor = plannedForOf(context);
   return {
     eligible: override || (plannedFor !== null && plannedFor <= cutoff),
     reason: override

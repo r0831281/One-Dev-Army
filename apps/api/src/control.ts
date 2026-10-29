@@ -112,9 +112,12 @@ export class RunControlService {
       repositoryRoot: string;
       continueAsNewAfterTransitions?: number;
       fakeCompletionDelayMs?: number;
+      /** Local database the analysis agents may query read-only (v3 only). */
+      dataSource?: { environmentPath: string; database: string };
     },
   ) {
     const manifest = validateRunManifest(value.manifest);
+    if (value.dataSource && manifest.workflowVersion !== 3) throw new Error("DATA_SOURCE_REQUIRES_V3");
     const context = validateTaskContext(value.context);
     if (context.taskId !== manifest.taskId || context.revision !== manifest.contextRevision)
       throw new Error("CONTEXT_MANIFEST_MISMATCH");
@@ -150,6 +153,7 @@ export class RunControlService {
       ...(value.fakeCompletionDelayMs === undefined
         ? {}
         : { fakeCompletionDelayMs: value.fakeCompletionDelayMs }),
+      ...(value.dataSource ? { dataSource: value.dataSource } : {}),
     };
     const prior = await this.commands.byKey(idempotencyKey);
     const previousBindings = (prior?.payload as unknown as RunStartCommandPayload | undefined)?.input
@@ -162,6 +166,8 @@ export class RunControlService {
       );
       input.profileBindings = {};
       for (const [role, id] of Object.entries(assignments.rows[0]?.assignments ?? {})) {
+        // The manifest declares which roles the run uses; a v3 analysis run pins only reviewer and planner.
+        if (!(role in manifest.profileRevisions)) continue;
         const result = await this.pool.query<{
           id: string;
           revision: number;
@@ -352,7 +358,8 @@ export class RunControlService {
         if (
           !p ||
           (!["fake", "ollama"].includes(p.provider) &&
-            (!p.profile.credentialRef?.startsWith("env:") || !process.env[p.profile.credentialRef.slice(4)]))
+            (!p.profile.credentialRef?.startsWith("env:") ||
+              !credentialAvailable(p.profile.credentialRef.slice(4))))
         ) {
           await this.pool.query(
             "UPDATE command_requests SET available_at=now()+interval '60 seconds',result=$2 WHERE id=$1",
@@ -360,8 +367,10 @@ export class RunControlService {
           );
           return;
         }
-        // Current workflow execution is deterministic. Do not silently pretend a configured live model was invoked.
-        if (p.provider !== "fake") {
+        // Workflow v3 runs live Anthropic analysis and planning; every other path is still deterministic.
+        // Do not silently pretend a configured live model was invoked.
+        const live = payload.input.manifest.workflowVersion === 3 && p.provider === "anthropic";
+        if (p.provider !== "fake" && !live) {
           await this.pool.query(
             "UPDATE command_requests SET available_at=now()+interval '60 seconds',result=$2 WHERE id=$1",
             [command.id, { reason: "EXECUTION_BACKEND", role }],
@@ -478,6 +487,18 @@ export class RunControlService {
   }
 }
 
+/**
+ * Credentials live in the process that uses them. The API checks its own environment, plus the
+ * non-secret list of variable names the worker launcher reports in ODA_WORKER_CREDENTIALS.
+ */
+export function credentialAvailable(name: string): boolean {
+  if (process.env[name]) return true;
+  return (process.env.ODA_WORKER_CREDENTIALS ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .includes(name);
+}
+
 export function createRunManifest(input: {
   taskId: string;
   contextRevision: number;
@@ -487,7 +508,7 @@ export function createRunManifest(input: {
   policyHash: string;
   profileRevisions?: Record<string, number>;
   humanReplans?: number;
-  workflowVersion?: 1 | 2;
+  workflowVersion?: 1 | 2 | 3;
 }): RunManifest {
   return validateRunManifest({
     schemaVersion: "1.0",

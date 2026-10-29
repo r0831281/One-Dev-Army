@@ -86,13 +86,40 @@ export function mountWorkspaceControls() {
     );
     submit(f, "Save limits");
   }
+  if (!get("repository-form")) {
+    const parent = section("Repositories");
+    parent.append(
+      make(
+        "p",
+        null,
+        "Local checkouts agents may read (read-only, pinned to the default branch head). A task uses the repository that claims its key prefix, e.g. ABC for ABC-44.",
+        "muted",
+      ),
+      make("div", "repository-list"),
+    );
+    const f = form(parent, "repository-form", "repository-status");
+    f.append(Object.assign(make("input", "repository-id"), { type: "hidden" }));
+    field(f, "repository-name", "Name", "text", { required: "", maxlength: 200 });
+    field(f, "repository-path", "Local path (absolute)", "text", {
+      required: "",
+      placeholder: "/Users/me/code/customer-addons",
+    });
+    field(f, "repository-branch", "Default branch", "text", { required: "", value: "main", maxlength: 200 });
+    field(f, "repository-prefixes", "Task key prefixes (comma separated)", "text", {
+      placeholder: "ABC, DEF",
+    });
+    submit(f, "Save repository");
+    const reset = make("button", "repository-new", "New repository");
+    reset.type = "button";
+    f.append(reset);
+  }
   if (!get("connector-form")) {
     const parent = section("Task connectors");
     parent.append(
       make(
         "p",
         null,
-        "Read-only GitHub and Jira Cloud fetches. Set the full Authorization header value in an environment variable on the API host; enter only its name here.",
+        "Read-only GitHub, Jira Cloud and Odoo fetches. Set the secret in an environment variable on the API host and enter only its name here: the full Authorization header for GitHub, Jira and Tempo, the API key for Odoo.",
         "muted",
       ),
       make("div", "connector-list"),
@@ -104,6 +131,7 @@ export function mountWorkspaceControls() {
       choices: [
         ["github", "GitHub"],
         ["jira", "Jira Cloud"],
+        ["odoo", "Odoo"],
       ],
     });
     field(f, "connector-repository-id", "Repository", "select", { required: "" });
@@ -115,6 +143,25 @@ export function mountWorkspaceControls() {
     field(f, "connector-owner", "GitHub owner");
     field(f, "connector-repo", "GitHub repository");
     field(f, "connector-project", "Jira project key");
+    field(f, "connector-tempo-account", "Tempo planning: Atlassian account ID (blank = off)", "text", {
+      maxlength: 128,
+    });
+    field(f, "connector-tempo-credential", "Tempo token environment variable", "text", {
+      pattern: "[A-Z_][A-Z0-9_]*",
+      placeholder: "ODA_TEMPO_AUTH",
+    });
+    field(f, "connector-odoo-version", "Odoo API", "select", {
+      choices: [
+        ["jsonrpc", "JSON-RPC (Odoo 18 and earlier)"],
+        ["json2", "JSON-2 (Odoo 19 and later)"],
+      ],
+    });
+    field(f, "connector-odoo-database", "Odoo database", "text", { maxlength: 63 });
+    field(f, "connector-odoo-login", "Odoo API user login (JSON-RPC)", "text", { maxlength: 254 });
+    field(f, "connector-odoo-key-field", "Odoo task key field", "text", {
+      pattern: "[a-z_][a-z0-9_]*",
+      value: "project_key_display",
+    });
     field(f, "connector-credential", "Credential environment variable", "text", {
       pattern: "[A-Z_][A-Z0-9_]*",
       required: "",
@@ -133,7 +180,7 @@ export function mountWorkspaceControls() {
     const fetchForm = form(parent, "connector-fetch-form", "connector-status");
     field(fetchForm, "connector-identifier", "Fetch task by identifier", "text", {
       required: "",
-      placeholder: "owner/repo#123 or PROJECT-123",
+      placeholder: "owner/repo#123, PROJECT-123 or an Odoo key such as ABC-1233",
     });
     submit(fetchForm, "Test & fetch task");
   }

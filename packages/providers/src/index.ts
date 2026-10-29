@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { anthropicFinishReason } from "./anthropic.js";
 
 export type ProviderKind = "fake" | "ollama" | "openai" | "anthropic" | "gemini" | "openrouter" | "bedrock";
 export interface ProviderCapabilities {
@@ -26,7 +27,7 @@ export interface GenerateRequest {
   messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
   outputSchema?: Record<string, unknown>;
   temperature?: number;
-  reasoningEffort?: "low" | "medium" | "high";
+  reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max";
   timeoutMs: number;
   maxOutputTokens: number;
 }
@@ -189,9 +190,10 @@ const capabilities: Record<Exclude<ProviderKind, "fake">, ProviderCapabilities> 
     provider: "anthropic",
     streaming: true,
     nativeTools: true,
-    jsonSchema: false,
-    temperature: true,
-    reasoningControls: ["high"],
+    // Structured outputs (output_config.format); sampling parameters are rejected by current models.
+    jsonSchema: true,
+    temperature: false,
+    reasoningControls: ["low", "medium", "high", "xhigh", "max"],
     cacheAccounting: true,
     imageInput: true,
     local: false,
@@ -249,7 +251,10 @@ export class FixtureProviderAdapter implements ProviderAdapter {
       model: request.model,
       resolvedProvider: typeof this.fixture.provider === "string" ? this.fixture.provider : null,
       content,
-      finishReason: "stop" as const,
+      finishReason:
+        this.kind === "anthropic" && typeof this.fixture.stop_reason === "string"
+          ? anthropicFinishReason(this.fixture.stop_reason)
+          : ("stop" as const),
       usage: normalizeUsageFixture(this.kind, this.fixture),
     };
     return { ...base, responseHash: sha(base) };

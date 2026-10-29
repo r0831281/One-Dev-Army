@@ -1,10 +1,19 @@
 import { mountWorkspaceControls } from "./workspace-controls.js";
+import { mountEnvironmentSettings, renderAnalysePanel } from "./environments.js";
 import { $, stored, remember, preferences, state, auth, node } from "./core.js";
 import { startGateParticles, stopGateParticles } from "./particles.js";
 import { createDemo } from "./demo.js";
 import { createSettings, settingsState } from "./settings.js";
 import { createTelemetry } from "./telemetry.js";
 mountWorkspaceControls();
+{
+  const dialog = document.getElementById("settings-dialog");
+  if (dialog)
+    mountEnvironmentSettings(dialog.querySelector(".settings-scroll") || dialog, {
+      request: (...args) => request(...args),
+      errorLabel: (error) => analyseErrorLabel(error),
+    });
+}
 let telemetry = null;
 const demo = createDemo({
   selected,
@@ -60,6 +69,26 @@ async function request(path, options = {}) {
     if (error instanceof TypeError) connection("Offline", "offline");
     throw error;
   }
+}
+const ANALYSE_ERRORS = {
+  LIVE_AGENTS_NOT_CONFIGURED:
+    "assign Anthropic profiles to the context-reviewer and planner roles in Settings → Agent profiles.",
+  PROFILE_REVISION_CONFLICT:
+    "an assigned agent profile changed while starting. Reload the page and try again.",
+  PROVIDER_UNAVAILABLE: "the assigned profile's credential is not set in the API process.",
+  IDEMPOTENCY_CONFLICT: "a previous start attempt is still recorded. Reload the page and try again.",
+  ENVIRONMENT_NOT_FOUND: "that work environment no longer exists. Rescan environments in Settings.",
+  ENVIRONMENT_BRANCH_NOT_FOUND: "that branch does not exist in the environment's checkout.",
+  DATABASE_NOT_IN_ENVIRONMENT: "that database does not belong to the chosen environment.",
+  CONFIRMATION_REQUIRED: "type the database name exactly to confirm.",
+  BACKUP_PATH_DENIED: "backups must be inside the downloads folder or the environment folder.",
+  RESTORE_ALREADY_RUNNING: "a restore is already running for this environment.",
+  DATABASE_IN_USE: "the database has open connections; stop Odoo or close sessions first.",
+  DATABASE_NOT_SCRATCH: "only codex_, claude_ or oda_ scratch copies can be deleted here.",
+};
+function analyseErrorLabel(error) {
+  const label = ANALYSE_ERRORS[error.code];
+  return label ? `${label} (${error.code})` : error.message;
 }
 function selected() {
   const direct = state.runs.find((r) => r.runId === state.selected);
@@ -202,7 +231,11 @@ function renderWork() {
           "small",
           `${task.source.key} · ${task.source.provider || "Source"}${task.customer ? ` · ${task.customer}` : ""}`,
         ),
-        node("small", `Planned ${shortDate(task.plannedFor)} · from Jira`, "task-plan-label"),
+        node(
+          "small",
+          `Planned ${shortDate(task.plannedFor)} · ${planningSourceLabel(task)}`,
+          "task-plan-label",
+        ),
         node("small", stateInfo.label, `case-status ${stateInfo.kind}`),
       );
       const eligibility = taskWorkEligibility(task);
@@ -271,6 +304,11 @@ function localDateKey(date) {
   const year = date.getFullYear();
   return `${year}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
+function planningSourceLabel(task) {
+  if (task.extensions?.["community.tempo.planning"]) return "from Tempo";
+  if (task.extensions?.["community.jira.planning"] || task.source?.provider === "Jira") return "from Jira";
+  return "unplanned";
+}
 function renderPlanner() {
   const host = $("week-grid");
   host.replaceChildren();
@@ -285,7 +323,7 @@ function renderPlanner() {
       })
     : "not synced yet";
   $("week-range").textContent =
-    `${monday.toLocaleDateString(undefined, { month: "short", day: "numeric" })}–${friday.toLocaleDateString(undefined, { month: "short", day: "numeric" })} · Jira sync every 30 min · last checked ${syncTime}`;
+    `${monday.toLocaleDateString(undefined, { month: "short", day: "numeric" })}–${friday.toLocaleDateString(undefined, { month: "short", day: "numeric" })} · planning sync every 30 min · last checked ${syncTime}${state.planningSync?.unlinked?.length ? ` · ${state.planningSync.unlinked.length} planned without a task key` : ""}`;
   const today = localDateKey(new Date());
   for (let index = 0; index < 5; index++) {
     const date = new Date(monday);
@@ -313,7 +351,7 @@ function renderPlanner() {
       column.append(item);
     }
     if (!state.tasks.some((candidate) => candidate.plannedFor === key))
-      column.append(node("span", "No Jira-planned work", "day-empty"));
+      column.append(node("span", "No planned work", "day-empty"));
     host.append(column);
   }
 }
@@ -458,6 +496,42 @@ function renderSummary(run = selected()) {
     "policy-note",
   );
   host.append(note);
+  if (
+    task &&
+    !state.fixtureMode &&
+    (!run || ["COMPLETED", "CANCELLED", "FAILED"].includes(run.projection.state))
+  ) {
+    const live = settingsState.configuration?.readiness?.liveModelExecution;
+    const analyse = node("div", "", "actions");
+    const start = node("button", run ? "Analyse again with agents" : "Analyse with agents", "approve");
+    const status = node(
+      "p",
+      live
+        ? "Claude reviews the task and its repository (read-only), asks questions, then proposes a plan for your approval. Spend counts against your task and daily caps."
+        : "Assign Anthropic profiles to the context-reviewer and planner roles in Settings to enable live analysis.",
+      "muted",
+    );
+    start.disabled = !state.online || !live;
+    const panelHost = node("div", "", "analyse-panel-host");
+    start.onclick = () => {
+      start.hidden = true;
+      status.hidden = true;
+      void renderAnalysePanel(panelHost, task, {
+        request,
+        errorLabel: analyseErrorLabel,
+        // One key per task, previous run and choice, so a double click never starts two runs.
+        idempotencyKey: (body) => {
+          const intent = `oda-analyse/${task.taskId}/${run?.runId ?? "first"}/${JSON.stringify(body)}`;
+          const key = localStorage.getItem(intent) || crypto.randomUUID();
+          localStorage.setItem(intent, key);
+          return key;
+        },
+        onStarted: () => load(true),
+      });
+    };
+    analyse.append(start);
+    host.append(analyse, status, panelHost);
+  }
   if (run?.projection.state === "QUEUED") {
     const queued = node("div", "", "actions");
     const waiting = node("p", waitingLabel(task, run), "muted");
@@ -769,6 +843,7 @@ function renderGate(run = selected()) {
     return;
   }
   host.hidden = false;
+  if (renderLiveGate(host, run, gate)) return;
   if (gate.kind === "RECOVERY" && gate.proposal?.reason === "QA repair budget exhausted") {
     const proposal = gate.proposal;
     const card = node("section", "", "recovery-card");
@@ -976,6 +1051,109 @@ function renderGate(run = selected()) {
   host.append(actions, editor, decisionGrid);
   requestAnimationFrame(() => startGateParticles(canvas));
 }
+/** Gates of live analysis runs (workflow v3): real questions, real plans and agent failures. */
+function renderLiveGate(host, run, gate) {
+  if (run?.manifest?.workflowVersion !== 3) return false;
+  const proposal = gate.proposal || {};
+  const card = node("section", "", "recovery-card live-gate");
+  const list = (title, items, ordered = false) => {
+    if (!Array.isArray(items) || !items.length) return null;
+    const block = node("div", "", "decision-block");
+    const listNode = document.createElement(ordered ? "ol" : "ul");
+    for (const item of items) listNode.append(node("li", item));
+    block.append(node("strong", title), listNode);
+    return block;
+  };
+  const feedback = document.createElement("textarea");
+  feedback.maxLength = 8000;
+  feedback.value = localStorage.getItem(draftKey(gate)) || "";
+  const primary = node("button", "", "approve");
+  const secondary = node("button", "", "reject");
+  const sync = () => {
+    localStorage.setItem(draftKey(gate), feedback.value);
+    primary.disabled = !state.online || state.busy;
+    secondary.disabled = primary.disabled || !feedback.value.trim();
+  };
+  feedback.oninput = sync;
+  if (gate.kind === "CLARIFICATION") {
+    card.append(
+      node("span", "YOUR INPUT · CONTEXT REVIEW", "eyebrow"),
+      node("h2", "The context reviewer has questions"),
+      node(
+        "p",
+        "Answer the questions to have the task reviewed again, or accept the proposed assumptions to continue to planning.",
+      ),
+    );
+    for (const block of [
+      list("Questions", proposal.questions, true),
+      list("Proposed assumptions", proposal.proposedAssumptions),
+      list("Relevant files", proposal.relevantPaths),
+    ])
+      if (block) card.append(block);
+    feedback.placeholder = "Your answers to the questions";
+    feedback.setAttribute("aria-label", "Answers to the context reviewer");
+    primary.textContent = "Accept assumptions and plan";
+    secondary.textContent = "Send answers and review again";
+  } else if (gate.kind === "PLAN_APPROVAL") {
+    card.append(
+      node("span", `YOUR DECISION · PLAN REVISION ${gate.version}`, "eyebrow"),
+      node("h2", proposal.title || "Plan ready for your review"),
+    );
+    const steps = node("div", "", "decision-block");
+    steps.append(node("strong", "Steps"));
+    const ordered = document.createElement("ol");
+    for (const step of proposal.steps || []) {
+      const item = node("li", "");
+      item.append(node("b", step.title), node("p", step.description));
+      const checks = list("Checks", step.tests);
+      if (checks) item.append(checks);
+      ordered.append(item);
+    }
+    steps.append(ordered);
+    card.append(steps);
+    for (const block of [
+      list("Acceptance mapping", proposal.acceptanceMapping),
+      list("Risks", proposal.risks),
+    ])
+      if (block) card.append(block);
+    card.append(
+      node(
+        "p",
+        "Approving records the plan. Implementation by agents is not enabled yet; you implement from this plan.",
+        "muted",
+      ),
+    );
+    feedback.placeholder = "What should the planner change?";
+    feedback.setAttribute("aria-label", "Plan change request");
+    primary.textContent = "Approve plan";
+    secondary.textContent = "Request changes";
+  } else if (gate.kind === "RECOVERY") {
+    card.append(
+      node("span", "YOUR DECISION · AGENT STOPPED", "eyebrow"),
+      node("h2", proposal.reason || "An agent step needs attention"),
+      node("p", proposal.detail || ""),
+      node(
+        "p",
+        proposal.code === "TASK_BUDGET_EXHAUSTED" || proposal.code === "DAILY_BUDGET_EXHAUSTED"
+          ? "The spending cap was reached. Raise it in Settings before retrying."
+          : "Retrying runs the step again and may spend more.",
+        "muted",
+      ),
+    );
+    feedback.placeholder = "Reason for cancelling this run";
+    feedback.setAttribute("aria-label", "Reason for cancelling the run");
+    primary.textContent = "Retry step";
+    secondary.textContent = "Cancel run";
+  } else return false;
+  primary.onclick = () => decide(run, "APPROVE");
+  secondary.onclick = () => decide(run, "REJECT", feedback.value);
+  sync();
+  const actions = node("div", "", "recovery-actions");
+  actions.append(primary, secondary);
+  card.append(feedback, actions);
+  host.append(card);
+  return true;
+}
 async function decide(run, decision, reason = "") {
   const gate = run.projection.currentGate;
   if (decision === "REJECT" && !reason.trim()) return alert("Enter a rejection reason.");
@@ -1077,7 +1255,7 @@ function renderInspector() {
     planning.append(
       node("span", "Planning", "eyebrow"),
       node("b", task.plannedFor ? shortDate(task.plannedFor) : "Backlog"),
-      node("p", `Jira context revision ${task.planningRevision || 0} · read-only`, "muted"),
+      node("p", `Source context revision ${task.planningRevision || 0} · read-only`, "muted"),
     );
     grid.append(detail, planning);
     host.append(grid);

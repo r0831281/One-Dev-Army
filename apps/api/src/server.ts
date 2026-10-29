@@ -11,6 +11,8 @@ import { ProfileRegistry } from "../../../packages/agents/src/index.js";
 import { connectTemporalGateway, RunControlService, type TemporalGateway } from "./control.js";
 import { createLocalApi, IngestionService, type IngestionDependencies } from "./index.js";
 import { WorkspaceConfiguration } from "./configuration.js";
+import { horizonWindow } from "./horizon.js";
+import { WorkEnvironments } from "./environments.js";
 
 const { Pool } = pg;
 
@@ -52,6 +54,7 @@ export async function runApi(): Promise<void> {
     },
   };
   const configuration = new WorkspaceConfiguration(pool, workspaceId, profiles, dependencies);
+  dependencies.resolveRepository = (key) => configuration.resolveRepository(key);
   await configuration.initialize();
   const ingestion = new IngestionService(dependencies);
   const control = new RunControlService(pool, temporalGateway, workspaceId, workspaceId, (taskId) =>
@@ -62,6 +65,7 @@ export async function runApi(): Promise<void> {
     runControl: control,
     profiles,
     configuration,
+    environments: new WorkEnvironments(pool, workspaceId),
     async telemetry() {
       const observedAt = new Date().toISOString();
       const windowEnd = Math.floor(Date.parse(observedAt) / 1000);
@@ -153,7 +157,11 @@ export async function runApi(): Promise<void> {
     250,
   );
   const planningPoller = setInterval(
-    () => void ingestion.refreshTasks().catch(() => console.error("CONNECTOR_REFRESH_FAILED")),
+    () =>
+      void control.horizon
+        .settings()
+        .then((settings) => ingestion.sync(horizonWindow(settings)))
+        .catch(() => console.error("CONNECTOR_REFRESH_FAILED")),
     30 * 60 * 1000,
   );
   await new Promise<void>((resolvePromise, reject) => {

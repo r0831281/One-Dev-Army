@@ -1,8 +1,14 @@
 import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import pg from "pg";
+import Anthropic from "@anthropic-ai/sdk";
 import { createPersistentActivities } from "./activities.js";
+import { createLiveActivities } from "./live-activities.js";
+import { anthropicModelTurn } from "../../../packages/providers/src/anthropic.js";
+import { createRepoReader } from "../../../packages/sandboxes/src/repo-read.js";
+import { createDbReader } from "../../../packages/sandboxes/src/db-read.js";
+import { odooConnection } from "../../api/src/environments.js";
 import { TASK_RUN_QUEUE } from "./types.js";
 
 const { Pool } = pg;
@@ -33,7 +39,34 @@ export async function createTaskRunWorker(options: WorkerOptions = {}): Promise<
     namespace: options.namespace ?? process.env.ODA_TEMPORAL_NAMESPACE ?? "default",
     taskQueue: options.taskQueue ?? TASK_RUN_QUEUE,
     workflowsPath: resolve(current, "workflows.js"),
-    activities: createPersistentActivities(pool),
+    activities: {
+      ...createPersistentActivities(pool),
+      ...createLiveActivities(pool, {
+        modelTurn: process.env.ANTHROPIC_API_KEY
+          ? anthropicModelTurn(new Anthropic({ maxRetries: 2 }))
+          : async () => {
+              throw new Error("PROVIDER_UNAVAILABLE");
+            },
+        async dbFor(source) {
+          // The API validated the environment and database; re-check the shape before connecting.
+          if (
+            !isAbsolute(source.environmentPath) ||
+            !/^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/.test(source.database)
+          )
+            return null;
+          return createDbReader(await odooConnection({ path: source.environmentPath }, source.database));
+        },
+        async readerFor(root, baseSha) {
+          // Tasks without a mapped repository run from the task text only.
+          if (!root) return null;
+          try {
+            return await createRepoReader({ root, baseSha });
+          } catch {
+            return null;
+          }
+        },
+      }),
+    },
   });
   return {
     worker,

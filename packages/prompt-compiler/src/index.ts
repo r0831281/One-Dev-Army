@@ -48,8 +48,8 @@ export interface AgentProfile {
 }
 
 const roleTools: Record<AgentRole, ReadonlySet<string>> = {
-  "context-reviewer": new Set(["repo.read", "repo.search"]),
-  planner: new Set(["repo.read", "repo.search"]),
+  "context-reviewer": new Set(["repo.read", "repo.search", "db.query"]),
+  planner: new Set(["repo.read", "repo.search", "db.query"]),
   implementer: new Set(["repo.read", "repo.search", "sandbox.write", "sandbox.exec"]),
   tester: new Set(["repo.read", "sandbox.exec"]),
   reviewer: new Set(["repo.read", "repo.search", "sandbox.exec"]),
