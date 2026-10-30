@@ -224,6 +224,7 @@ export async function TaskRunWorkflow(input: TaskRunWorkflowInput): Promise<Work
         iteration,
         ...(planRevision === undefined ? {} : { planRevision }),
         ...(input.dataSource ? { dataSource: input.dataSource } : {}),
+        ...(role === "planner" ? { brief: clarification } : {}),
       };
     };
     const openAndWait = async (
@@ -314,7 +315,11 @@ export async function TaskRunWorkflow(input: TaskRunWorkflowInput): Promise<Work
       }
       advance("AWAITING_PLAN");
       projection = { ...projection, plan: planned.output };
-      const decision = await openAndWait("PLAN_APPROVAL", planRevision, planned.artifactHash, planned.output);
+      // The brief travels with the plan so the gate shows what the plan was built from.
+      const decision = await openAndWait("PLAN_APPROVAL", planRevision, planned.artifactHash, {
+        ...planned.output,
+        ...(clarification?.requirements?.length ? { context: clarification } : {}),
+      });
       if (!decision || projection.cancelRequested) return finishCancellation();
       if (decision.decision === "APPROVE") break;
       const used = projection.budget.humanReplansUsed + 1;

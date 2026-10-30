@@ -37,6 +37,8 @@ import {
   PLAN_OUTPUT_SCHEMA,
   acceptClarification,
   acceptPlan,
+  contextSources,
+  renderBrief,
   renderTask,
   runAgent,
   type DbReader,
@@ -57,6 +59,8 @@ export interface LiveStepInput {
   planRevision?: number;
   /** Present only when the user allowed read-only queries against a local database copy. */
   dataSource?: { environmentPath: string; database: string };
+  /** Planner only: the context review that passed the context gate. */
+  brief?: Clarification | null;
 }
 export type LiveStepResult<T> =
   | { ok: true; output: T; artifactHash: string; calls: number; costMicrousd: number | null }
@@ -82,29 +86,34 @@ function uuidFromHash(value: string): string {
 const ROLE_GUIDANCE: Record<LiveRole, { practices: string[]; style: string[]; tools: string[] }> = {
   "context-reviewer": {
     practices: [
-      "Tasks are Odoo customer work; the repository holds Odoo addons. Locate the modules, models, views and reports the task touches before judging it.",
-      "Investigate before asking. Never ask something the repository, the database or Odoo's standard behaviour can answer (which module, which field, current format, printer flow); look it up and cite it.",
-      "Ask only what the requester alone can decide, such as business choices with no sensible default or a missing attachment, and only when the answer changes the implementation. Ask at most five questions, most important first.",
-      "Turn everything else into a proposedAssumption with a concrete default an experienced Odoo developer would pick (for example: keep the existing printer and label stock, use the delivery address, ISO country name in the partner's language, wrap long lines). The requester can correct an assumption cheaply.",
-      "When the task has images, look at them first: a screenshot of an invoice, report or screen usually answers which document, layout or field is meant. Ask about it only if the images and the repository together leave it open.",
-      "The repository is the customer's staging checkout for one Odoo version. If the task may target another version or checkout (for example an upgrade project prepared next to the current version, or a feature branch), ask which one instead of assuming.",
+      "You are the quality gate before planning. Work in three phases and finish each before the next. The planner trusts your result and does not investigate scope again.",
+      "Phase 1, gather. Read the whole task: the description, every discussion message (M1, M2, …) and every image. Tasks are Odoo customer work and the repository holds the customer's addons. Find the modules, models, views, reports and translations the task touches and read them at the pinned commit. When a database copy is available, query it for the facts the task depends on.",
+      "Phase 2, analyse. Turn everything that is asked into requirements, one concrete change each (R1, R2, …), and cite where each comes from: description, M3, image 2. Later messages add to or correct earlier ones. A change the requester or a colleague asks for in a comment is in scope unless a message says otherwise; include it. When a later message supersedes an earlier request, keep only the latest version. List a message or image that asks for nothing under noAction with the reason (a timer, a deadline change, a thank-you).",
+      "For every requirement, compare the request with the current code and set its status: new (nothing there yet), partial (some of it exists; say what is missing), or implemented (the code already does it; cite the files and lines). Read the code before you decide; never guess. Put the evidence in evidence and the files in paths. Record what you established about the current behaviour under findings, so nobody has to look it up again.",
+      "Phase 3, decide. The context is sufficient when every new or partial requirement has a clear target (file, model, view or report) and a checkable outcome. Never ask something the repository, the database, the images or Odoo's standard behaviour can answer. Ask only what the requester alone can decide and only when the answer changes the implementation, at most five questions, most important first. Everything else becomes a proposedAssumption with the concrete default an experienced Odoo developer would pick (for example a sensible number of decimals, keep the existing printer and label stock).",
+      "The repository is the customer's staging checkout for one Odoo version. If the task may target another version or checkout (an upgrade project or a feature branch), ask which one instead of assuming.",
     ],
     style: [
       "Be concise and specific; cite repository paths you actually read.",
-      "Set sufficient to true only if a developer could implement the task without asking anything; otherwise list the questions. Put safe defaults in proposedAssumptions and the files that matter in relevantPaths.",
+      "Set sufficient to true exactly when you have no questions. Put the files that matter in relevantPaths.",
     ],
-    tools: ["Use repo_list and repo_search to find relevant addons, then repo_read the specific files."],
+    tools: [
+      "Use repo_list and repo_search to find relevant addons, then repo_read the specific files. Search for the labels, fields and texts that appear in the task and its images.",
+    ],
   },
   planner: {
     practices: [
-      "Plan small, testable steps that follow Odoo conventions (manifest, models, views, security, data, tests).",
-      "Map every acceptance criterion, or the task description when there are none, to at least one step.",
+      "Start from the CONTEXT BRIEF. Its requirements, statuses, findings and assumptions are settled: do not re-open scope, and do not raise questions about it in risks.",
+      "Plan only requirements that are new or partial. An implemented requirement gets at most one verification step; a partial one plans only the missing part.",
+      "Plan small, testable steps that follow Odoo conventions (manifest, models, views, security, data, translations, tests). Read the code a step changes before planning it.",
+      "When a detail is still open, state the choice you make in the step and list it under risks as an assumption, not as a question.",
     ],
     style: [
       "Name concrete files and Odoo objects in step descriptions; list concrete checks under tests.",
-      "Return a short title, ordered steps with ids like step-1, the acceptance mapping and the main risks.",
+      'Map every new or partial requirement in acceptanceMapping, one entry each, like "R1 → S1, S2: <how it is checked>".',
+      "Return a short title, ordered steps with ids like S1, the acceptance mapping and the main risks.",
     ],
-    tools: ["Read the code a step changes before planning it."],
+    tools: ["Read only the code a step changes; the brief already lists the relevant files."],
   },
 };
 
@@ -162,7 +171,7 @@ export function createLiveActivities(pool: Pool, deps: LiveDependencies): LiveAc
 
   async function step<T>(
     input: LiveStepInput,
-    accept: (value: unknown, reader: RepoReader | null) => Promise<T>,
+    accept: (value: unknown, reader: RepoReader | null, sources: string[]) => Promise<T>,
     outputSchema: Record<string, unknown>,
     extraTask: string[],
   ): Promise<LiveStepResult<T>> {
@@ -265,7 +274,7 @@ export function createLiveActivities(pool: Pool, deps: LiveDependencies): LiveAc
         reader,
         db,
         outputSchema,
-        accept: (value) => accept(value, reader),
+        accept: (value) => accept(value, reader, contextSources(input.context, sent)),
         modelTurn: deps.modelTurn,
         hooks: {
           async beforeCall(call) {
@@ -352,13 +361,18 @@ export function createLiveActivities(pool: Pool, deps: LiveDependencies): LiveAc
 
   return {
     analyseContext: (input) =>
-      step(input, (value, reader) => acceptClarification(value, reader), CLARIFICATION_OUTPUT_SCHEMA, []),
+      step(
+        input,
+        (value, reader, sources) => acceptClarification(value, reader, sources),
+        CLARIFICATION_OUTPUT_SCHEMA,
+        [],
+      ),
     planTask: (input) =>
       step(
         input,
-        async (value) => acceptPlan(value, input.planRevision ?? 1, input.constraints),
+        async (value) => acceptPlan(value, input.planRevision ?? 1, input.constraints, input.brief ?? null),
         PLAN_OUTPUT_SCHEMA,
-        [],
+        [renderBrief(input.brief ?? null)],
       ),
   };
 }

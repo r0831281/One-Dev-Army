@@ -1144,6 +1144,45 @@ function planBlocks(plan) {
     Boolean,
   );
 }
+const REQUIREMENT_STATUS = {
+  new: "new",
+  partial: "partly done",
+  implemented: "already done",
+  unverified: "not checked",
+};
+/** The context review as the planner receives it: requirements with status and sources, then findings. */
+function briefBlocks(brief) {
+  const requirements = Array.isArray(brief?.requirements) ? brief.requirements : [];
+  if (!requirements.length) return [];
+  const block = node("div", "", "decision-block");
+  const listNode = document.createElement("ul");
+  for (const r of requirements) {
+    const item = node("li", "");
+    item.append(
+      node("strong", `${r.id} · ${REQUIREMENT_STATUS[r.status] || r.status} · `),
+      document.createTextNode(r.text),
+      node("p", `From ${r.sources.join(", ")}. ${r.evidence}`, "muted"),
+    );
+    listNode.append(item);
+  }
+  block.append(node("strong", "Requirements found"), listNode);
+  const extra = (title, items) => {
+    if (!items.length) return null;
+    const section = node("div", "", "decision-block");
+    const ul = document.createElement("ul");
+    for (const text of items) ul.append(node("li", text));
+    section.append(node("strong", title), ul);
+    return section;
+  };
+  return [
+    block,
+    extra("Findings", Array.isArray(brief.findings) ? brief.findings : []),
+    extra(
+      "Asks for nothing",
+      (Array.isArray(brief.noAction) ? brief.noAction : []).map((n) => `${n.source}: ${n.reason}`),
+    ),
+  ].filter(Boolean);
+}
 function renderLiveGate(host, run, gate) {
   if (run?.manifest?.workflowVersion !== 3) return false;
   const proposal = gate.proposal || {};
@@ -1178,6 +1217,7 @@ function renderLiveGate(host, run, gate) {
     );
     for (const block of [
       list("Questions", proposal.questions, true),
+      ...briefBlocks(proposal),
       list("Proposed assumptions", proposal.proposedAssumptions),
       list("Relevant files", proposal.relevantPaths),
     ])
@@ -1191,6 +1231,16 @@ function renderLiveGate(host, run, gate) {
       node("span", `YOUR DECISION · PLAN REVISION ${gate.version}`, "eyebrow"),
       node("h2", proposal.title || "Plan ready for your review"),
     );
+    if (proposal.context) {
+      const brief = document.createElement("details");
+      brief.className = "decision-block";
+      brief.append(
+        node("summary", "Context brief the plan was built from"),
+        ...briefBlocks(proposal.context),
+        ...[list("Reviewer assumptions", proposal.context.proposedAssumptions)].filter(Boolean),
+      );
+      card.append(brief);
+    }
     card.append(...planBlocks(proposal));
     card.append(
       node(

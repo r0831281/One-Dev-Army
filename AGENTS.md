@@ -424,10 +424,26 @@ implementation needs a real sandbox, which is not built yet.
 **Starting a run.** Click **Analyse with agents** on a task, or call `POST /api/v1/tasks/<taskId>/analyse` with an
 optional `idempotency-key` header. The API builds the v3 manifest itself. Then:
 
-1. **Context review.** The context reviewer reads the task and, read-only, the repository that claims the task's key
-   prefix. If it has questions, a **clarification gate** opens:
+1. **Context review.** This is the quality gate before planning. The context reviewer works in three phases:
+   - **Gather:** it reads the description, every discussion message (labelled `M1`, `M2`, …) and every image, and
+     then, read-only, the code and the database copy.
+   - **Analyse:** it lists the requirements (`R1`, `R2`, …), including changes asked for in later comments. Each
+     requirement cites its sources. It compares each requirement with the current code and marks it `new`,
+     `partial` or `implemented`, citing the files.
+   - **Decide:** it judges the context sufficient only when it has no questions left.
+
+   `acceptClarification` enforces this. It rejects the review, so the model gets a repair turn, when:
+   - a message, image or the description is neither a requirement's source nor listed as asking for nothing;
+   - a requirement is left unchecked although the repository is available;
+   - an `implemented` or `partial` requirement cites no existing file;
+   - the review says sufficient but still asks questions.
+
+   The accepted review is handed to the planner as a `CONTEXT BRIEF`, assumptions included. The planner plans only
+   `new` and `partial` requirements, and its `acceptanceMapping` must name each one. The plan gate shows the brief.
+   If the reviewer has questions, a **clarification gate** opens:
    - **Send answers:** the review runs again with your answers.
    - **Accept assumptions:** the proposed assumptions are adopted and the run moves on to planning.
+
 2. **Planning.** The planner writes a plan and a **plan gate** opens:
    - **Request changes:** you get a new plan revision.
    - **Approve:** the run ends `COMPLETED` with the approved plan stored.

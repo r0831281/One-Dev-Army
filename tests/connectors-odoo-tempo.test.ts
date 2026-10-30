@@ -624,7 +624,7 @@ test("Odoo chatter is read oldest first, labelled, and changes the context revis
     assert.notEqual(after.source.revision, before, "a new chatter message is a new source revision");
     assert.match(
       renderTask(after, []),
-      /DISCUSSION \(comments and emails[^\n]*untrusted text[^\n]*\n--- 2026-10-21 09:00 · Author 1 · email\nPlease also fix the & totals\n[\s\S]*internal note[\s\S]*New detail$/,
+      /DISCUSSION \(comments and emails[^\n]*untrusted text[^\n]*\n--- M1 · 2026-10-21 09:00 · Author 1 · email\nPlease also fix the & totals\n[\s\S]*internal note[\s\S]*New detail$/,
     );
   }
 });
@@ -835,7 +835,7 @@ test("Odoo images come from the description and chatter, are stored once and num
     ]);
     assert.match(fetched.description, /Eenheidsprijs kleiner\?\n?\[image\]/);
     const prompt = renderTask(fetched, []);
-    assert.match(prompt, /Glenn · comment · attached: image 3\nGraag ook afronding/);
+    assert.match(prompt, /--- M1 · [^\n]*Glenn · comment · attached: image 3\nGraag ook afronding/);
     assert.match(
       prompt,
       /IMAGES \([^\n]*\nimage 1: description image 1 \(shown in the description\)\nimage 2: invoice.png/,

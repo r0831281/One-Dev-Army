@@ -16,6 +16,8 @@ import {
   CLARIFICATION_OUTPUT_SCHEMA,
   acceptClarification,
   acceptPlan,
+  contextSources,
+  renderBrief,
   runAgent,
   type RepoReader,
 } from "../apps/worker/src/live-agent.js";
@@ -378,4 +380,96 @@ test("task images follow the task text as labelled image blocks", async () => {
     { type: "text", text: "image 1: invoice.png" },
     { type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" } },
   ]);
+});
+
+test("the context gate rejects reviews that skip a task part or guess the code state", async () => {
+  const sources = ["description", "M1", "M2", "image 1"];
+  const requirement = (extra: Record<string, unknown> = {}) => ({
+    id: "R1",
+    text: "Make the description column wider",
+    sources: ["description"],
+    status: "partial",
+    evidence: "The column is 38% wide in sale.py",
+    paths: ["addons/sale_custom/models/sale.py"],
+    ...extra,
+  });
+  const review = (extra: Record<string, unknown> = {}) => ({
+    requirements: [requirement()],
+    noAction: [],
+    findings: [],
+    sufficient: true,
+    questions: [],
+    proposedAssumptions: [],
+    relevantPaths: [],
+    ...extra,
+  });
+  await assert.rejects(acceptClarification(review(), reader, sources), /Not accounted for: M1, M2, image 1/);
+  const complete = review({
+    requirements: [
+      requirement({ sources: ["description", "image 1"] }),
+      requirement({ id: "R2", text: "Round the unit price", sources: ["M1"], status: "new", paths: [] }),
+    ],
+    noAction: [{ source: "M2", reason: "Timer started" }],
+  });
+  const accepted = await acceptClarification(complete, reader, sources);
+  assert.equal(accepted.requirements?.length, 2);
+  await assert.rejects(
+    acceptClarification(review({ noAction: [{ source: "M9", reason: "x" }] }), reader, sources),
+    /Unknown sources M9/,
+  );
+  await assert.rejects(
+    acceptClarification(
+      { ...complete, requirements: [requirement({ sources: sources, status: "unverified" })] },
+      reader,
+      sources,
+    ),
+    /unverified, but the repository is available/,
+  );
+  await assert.rejects(
+    acceptClarification(
+      { ...complete, requirements: [requirement({ sources: sources, status: "implemented", paths: [] })] },
+      reader,
+      sources,
+    ),
+    /cite the files/,
+  );
+  await assert.rejects(
+    acceptClarification({ ...complete, questions: ["Which report?"] }, reader, sources),
+    /When sufficient is true, ask no questions/,
+  );
+  await assert.rejects(
+    acceptClarification(
+      { ...complete, requirements: [requirement({ sources: sources, paths: ["addons/missing.py"] })] },
+      reader,
+      sources,
+    ),
+    /R1.paths contains "addons\/missing.py"/,
+  );
+
+  // The planner must map every open requirement; an implemented one needs no mapping.
+  const plan = { title: "Widen", steps: [{ id: "S1", title: "t", description: "d", tests: [] }], risks: [] };
+  assert.throws(() => acceptPlan({ ...plan, acceptanceMapping: ["R1 → S1"] }, 1, [], accepted), /missing R2/);
+  assert.doesNotThrow(() =>
+    acceptPlan({ ...plan, acceptanceMapping: ["R1 → S1", "R2 → S1"] }, 1, [], accepted),
+  );
+  const brief = renderBrief(accepted);
+  assert.match(brief, /^CONTEXT BRIEF/);
+  assert.match(brief, /- R2 \[new\] Round the unit price\n  sources: M1/);
+  assert.match(brief, /M2: Timer started/);
+});
+
+test("context sources list the description, each message and each image", () => {
+  const context = {
+    description: "Fix it",
+    extensions: {
+      "community.source.discussion": {
+        messages: [
+          { author: null, at: "2026-10-28", kind: "comment", text: "a" },
+          { author: null, at: "2026-10-29", kind: "comment", text: "b" },
+        ],
+        omitted: 0,
+      },
+    },
+  } as never;
+  assert.deepEqual(contextSources(context, [{} as never]), ["description", "M1", "M2", "image 1"]);
 });

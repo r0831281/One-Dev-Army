@@ -77,6 +77,15 @@ const reply = (content, stop_reason) => ({
   usage,
 });
 const text = (value) => reply([{ type: "text", text: JSON.stringify(value) }], "end_turn");
+// The task's only part is its description; the review must account for it.
+const requirement = {
+  id: "R1",
+  text: "Change the discount compute",
+  sources: ["description"],
+  status: "partial",
+  evidence: "SaleOrder exists but has no discount rule.",
+  paths: ["addons/sale_custom/models/sale.py"],
+};
 const script = [
   // Review 1: reads code, then asks a question.
   reply(
@@ -84,6 +93,9 @@ const script = [
     "tool_use",
   ),
   text({
+    requirements: [requirement],
+    noAction: [],
+    findings: ["The discount is computed in SaleOrder."],
     sufficient: false,
     questions: ["Which price list applies?"],
     proposedAssumptions: [],
@@ -91,6 +103,9 @@ const script = [
   }),
   // Review 2 after the human answers: sufficient.
   text({
+    requirements: [requirement],
+    noAction: [],
+    findings: ["The discount is computed in SaleOrder."],
     sufficient: true,
     questions: [],
     proposedAssumptions: [],
@@ -100,13 +115,13 @@ const script = [
   text({
     title: "Plan v1",
     steps: [{ id: "step-1", title: "Patch", description: "Change compute", tests: ["Unit test"] }],
-    acceptanceMapping: [],
+    acceptanceMapping: ["R1 → step-1"],
     risks: [],
   }),
   text({
     title: "Plan v2",
     steps: [{ id: "step-1", title: "Patch", description: "Change compute, keep API", tests: ["Unit test"] }],
-    acceptanceMapping: [],
+    acceptanceMapping: ["R1 → step-1"],
     risks: ["None"],
   }),
 ];

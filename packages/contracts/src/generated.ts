@@ -228,6 +228,35 @@ export interface Clarification {
    * @maxItems 500
    */
   relevantPaths: string[];
+  /**
+   * @maxItems 50
+   */
+  requirements?: {
+    id: string;
+    text: string;
+    /**
+     * @minItems 1
+     * @maxItems 50
+     */
+    sources: [string, ...string[]];
+    status: "new" | "partial" | "implemented" | "unverified";
+    evidence: string;
+    /**
+     * @maxItems 50
+     */
+    paths: string[];
+  }[];
+  /**
+   * @maxItems 50
+   */
+  findings?: string[];
+  /**
+   * @maxItems 100
+   */
+  noAction?: {
+    source: string;
+    reason: string;
+  }[];
 }
 /**
  * This interface was referenced by `ODAReferenceContracts`'s JSON-Schema

@@ -168,7 +168,16 @@
         "schemaVersion": {"const": "1.0"}, "sufficient": {"type": "boolean"},
         "questions": {"type": "array", "maxItems": 50, "items": {"type": "string", "minLength": 1, "maxLength": 8000}},
         "proposedAssumptions": {"type": "array", "maxItems": 50, "items": {"type": "string", "minLength": 1, "maxLength": 8000}},
-        "relevantPaths": {"type": "array", "maxItems": 500, "items": {"type": "string", "minLength": 1, "maxLength": 4096}}
+        "relevantPaths": {"type": "array", "maxItems": 500, "items": {"type": "string", "minLength": 1, "maxLength": 4096}},
+        "requirements": {"type": "array", "maxItems": 50, "items": {
+          "type": "object", "additionalProperties": false, "required": ["id", "text", "sources", "status", "evidence", "paths"],
+          "properties": {"id": {"type": "string", "pattern": "^R[1-9][0-9]{0,2}$"}, "text": {"type": "string", "minLength": 1, "maxLength": 8000}, "sources": {"type": "array", "minItems": 1, "maxItems": 50, "items": {"type": "string", "minLength": 1, "maxLength": 40}}, "status": {"enum": ["new", "partial", "implemented", "unverified"]}, "evidence": {"type": "string", "minLength": 1, "maxLength": 8000}, "paths": {"type": "array", "maxItems": 50, "items": {"type": "string", "minLength": 1, "maxLength": 4096}}}
+        }},
+        "findings": {"type": "array", "maxItems": 50, "items": {"type": "string", "minLength": 1, "maxLength": 8000}},
+        "noAction": {"type": "array", "maxItems": 100, "items": {
+          "type": "object", "additionalProperties": false, "required": ["source", "reason"],
+          "properties": {"source": {"type": "string", "minLength": 1, "maxLength": 40}, "reason": {"type": "string", "minLength": 1, "maxLength": 8000}}
+        }}
       }
     },
     "Plan": {
