@@ -239,7 +239,7 @@ export interface Clarification {
      * @maxItems 50
      */
     sources: [string, ...string[]];
-    status: "new" | "partial" | "implemented" | "unverified";
+    status: "new" | "partial" | "implemented" | "external" | "unverified";
     evidence: string;
     /**
      * @maxItems 50

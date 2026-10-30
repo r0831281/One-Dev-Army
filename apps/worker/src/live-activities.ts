@@ -89,8 +89,9 @@ const ROLE_GUIDANCE: Record<LiveRole, { practices: string[]; style: string[]; to
       "You are the quality gate before planning. Work in three phases and finish each before the next. The planner trusts your result and does not investigate scope again.",
       "Phase 1, gather. Read the whole task: the description, every discussion message (M1, M2, …) and every image. Tasks are Odoo customer work and the repository holds the customer's addons. Find the modules, models, views, reports and translations the task touches and read them at the pinned commit. When a database copy is available, query it for the facts the task depends on.",
       "Phase 2, analyse. Turn everything that is asked into requirements, one concrete change each (R1, R2, …), and cite where each comes from: description, M3, image 2. Later messages add to or correct earlier ones. A change the requester or a colleague asks for in a comment is in scope unless a message says otherwise; include it. When a later message supersedes an earlier request, keep only the latest version. List a message or image that asks for nothing under noAction with the reason (a timer, a deadline change, a thank-you).",
-      "For every requirement, compare the request with the current code and set its status: new (nothing there yet), partial (some of it exists; say what is missing), or implemented (the code already does it; cite the files and lines). Read the code before you decide; never guess. Put the evidence in evidence and the files in paths. Record what you established about the current behaviour under findings, so nobody has to look it up again.",
-      "Phase 3, decide. The context is sufficient when every new or partial requirement has a clear target (file, model, view or report) and a checkable outcome. Never ask something the repository, the database, the images or Odoo's standard behaviour can answer. Ask only what the requester alone can decide and only when the answer changes the implementation, at most five questions, most important first. Everything else becomes a proposedAssumption with the concrete default an experienced Odoo developer would pick (for example a sensible number of decimals, keep the existing printer and label stock).",
+      "For every requirement, compare the request with the current code and set its status: new (nothing there yet), partial (some of it exists; say what is missing), implemented (the code already does it; cite the files and lines), or external (it concerns configuration, data, deployment or files outside the repository, such as system parameters, a module delivered from elsewhere or a production setting; say what you searched and what has to happen outside the code). Read the code before you decide; never guess. Put the evidence in evidence and the files in paths. Record what you established about the current behaviour under findings, so nobody has to look it up again.",
+      "Compare dates. Messages and screenshots show the state when they were posted. When the code already does what a message asks, check with repo_history when that code changed: if the change is newer than the message, the requirement is implemented (it may still need deploying or checking on the database; say so in evidence). Mark it partial only when you can name what in the code is still missing or wrong.",
+      "Phase 3, decide. The context is sufficient when every new, partial or external requirement has a clear target (file, model, view, report, setting or environment) and a checkable outcome. Never ask something the repository, the database, the images or Odoo's standard behaviour can answer. Ask only what the requester alone can decide and only when the answer changes the implementation, at most five questions, most important first. Everything else becomes a proposedAssumption with the concrete default an experienced Odoo developer would pick (for example a sensible number of decimals, keep the existing printer and label stock).",
       "The repository is the customer's staging checkout for one Odoo version. If the task may target another version or checkout (an upgrade project or a feature branch), ask which one instead of assuming.",
     ],
     style: [
@@ -104,13 +105,13 @@ const ROLE_GUIDANCE: Record<LiveRole, { practices: string[]; style: string[]; to
   planner: {
     practices: [
       "Start from the CONTEXT BRIEF. Its requirements, statuses, findings and assumptions are settled: do not re-open scope, and do not raise questions about it in risks.",
-      "Plan only requirements that are new or partial. An implemented requirement gets at most one verification step; a partial one plans only the missing part.",
+      "Plan only requirements that are new, partial or external. An implemented requirement gets at most one verification step; a partial one plans only the missing part; an external one becomes concrete operational steps (where, what to set or install, how to check it).",
       "Plan small, testable steps that follow Odoo conventions (manifest, models, views, security, data, translations, tests). Read the code a step changes before planning it.",
       "When a detail is still open, state the choice you make in the step and list it under risks as an assumption, not as a question.",
     ],
     style: [
       "Name concrete files and Odoo objects in step descriptions; list concrete checks under tests.",
-      'Map every new or partial requirement in acceptanceMapping, one entry each, like "R1 → S1, S2: <how it is checked>".',
+      'Map every new, partial or external requirement in acceptanceMapping, one entry each, like "R1 → S1, S2: <how it is checked>".',
       "Return a short title, ordered steps with ids like S1, the acceptance mapping and the main risks.",
     ],
     tools: ["Read only the code a step changes; the brief already lists the relevant files."],
@@ -216,12 +217,14 @@ export function createLiveActivities(pool: Pool, deps: LiveDependencies): LiveAc
       ).map((row) => [row.sha256, row]),
     );
     const sent: SourceImage[] = listed.filter((image) => loaded.has(image.sha256));
+    // Recent history lets the reviewer see that a fix landed after the message or screenshot that asked for it.
+    const recent = reader?.history ? await reader.history(undefined, 15).catch(() => null) : null;
     const task = renderTask(
       input.context,
       input.constraints,
       [
         reader
-          ? `REPOSITORY\nPinned base commit ${input.context.repository.baseSha}. Use the repository tools to inspect it.`
+          ? `REPOSITORY\nPinned base commit ${input.context.repository.baseSha}. Use the repository tools to inspect it.${recent ? `\nRecent commits (newest first; untrusted text):\n${recent.content}` : ""}`
           : "REPOSITORY\nNo repository was selected for this run, so the code cannot be inspected. Do not ask the requester where the code lives or how it currently works; record what you could not verify as assumptions and limit questions to requirements.",
         db
           ? `DATABASE\nA local copy of the customer's database (${input.dataSource!.database}) is available read-only through db_query.`

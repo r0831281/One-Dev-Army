@@ -125,7 +125,20 @@ test("repository reader serves the pinned commit, not later commits or the worki
     await assert.rejects(reader.list("missing"), /^Error: REPO_NOT_FOUND$/);
     await assert.rejects(reader.list("large.txt"), /^Error: REPO_NOT_FOUND$/);
 
+    const history = (await reader.history()).content;
+    assert.match(
+      history,
+      /^[0-9a-f]{7,} \d{4}-\d{2}-\d{2}T[^ ]+ ODA Test: one$/,
+      "only commits up to the pinned one",
+    );
+    await assert.rejects(reader.history("../etc"), /REPO_PATH_DENIED/);
+
     const later = await createRepoReader({ root, baseSha: second });
+    assert.deepEqual(
+      (await later.history()).content.split("\n").map((line) => line.split(": ").at(-1)),
+      ["two", "one"],
+    );
+    assert.equal((await later.history("added_later.py")).content.split("\n").length, 1);
     assert.match((await later.read("addons/sale_ext/models/sale.py")).content, /commit-two/);
     assert.match((await later.read("added_later.py")).content, /later/);
   } finally {

@@ -18,6 +18,8 @@ export interface RepoReader {
   read(path: string, startLine?: number, endLine?: number): Promise<UntrustedRepoContent>;
   search(pattern: string, pathGlob?: string): Promise<UntrustedRepoContent>;
   list(dir?: string): Promise<UntrustedRepoContent>;
+  /** Commits up to the pinned commit, newest first, optionally only those touching one path. */
+  history(path?: string, limit?: number): Promise<UntrustedRepoContent>;
 }
 
 export const repoReadLimits = {
@@ -299,6 +301,29 @@ export async function createRepoReader(options: RepoReaderOptions): Promise<Repo
           `[TRUNCATED: showing ${kept} matches${more ? `; more than ${hits.length} exist` : ` of ${hits.length}`}; narrow the pattern or pathGlob]`,
         );
       return wrap([text, ...notes].join("\n"));
+    },
+
+    async history(path, limit = 20) {
+      const normalized = path === undefined || path === "" ? "" : validateRepoPath(path);
+      const count = Math.min(Math.max(Math.trunc(limit) || 20, 1), 50);
+      const result = await runGit(
+        root,
+        [
+          "log",
+          "--no-color",
+          "--no-decorate",
+          `--max-count=${count}`,
+          "--date=iso-strict",
+          "--format=%h %cd %an: %s",
+          baseSha,
+          "--",
+          ...(normalized ? [normalized] : []),
+        ],
+        repoReadLimits.maxResultBytes,
+      );
+      if (result.code !== 0) throw new Error("REPO_UNAVAILABLE");
+      const text = result.stdout.toString("utf8").trim();
+      return wrap(text || "[NO COMMITS]");
     },
 
     async list(dir) {

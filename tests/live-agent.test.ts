@@ -433,6 +433,32 @@ test("the context gate rejects reviews that skip a task part or guess the code s
     ),
     /cite the files/,
   );
+  const external = await acceptClarification(
+    {
+      ...complete,
+      requirements: [
+        requirement({ sources: ["description", "image 1", "M1"], status: "external", paths: [] }),
+      ],
+    },
+    reader,
+    sources,
+  );
+  assert.throws(
+    () =>
+      acceptPlan(
+        {
+          title: "Ops",
+          steps: [{ id: "S1", title: "t", description: "d", tests: [] }],
+          risks: [],
+          acceptanceMapping: [],
+        },
+        1,
+        [],
+        external,
+      ),
+    /missing R1/,
+    "an external requirement must be planned too",
+  );
   await assert.rejects(
     acceptClarification({ ...complete, questions: ["Which report?"] }, reader, sources),
     /When sufficient is true, ask no questions/,

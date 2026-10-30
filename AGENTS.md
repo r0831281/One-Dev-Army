@@ -429,7 +429,8 @@ optional `idempotency-key` header. The API builds the v3 manifest itself. Then:
      then, read-only, the code and the database copy.
    - **Analyse:** it lists the requirements (`R1`, `R2`, …), including changes asked for in later comments. Each
      requirement cites its sources. It compares each requirement with the current code and marks it `new`,
-     `partial` or `implemented`, citing the files.
+     `partial` or `implemented`, citing the files, or `external` when it concerns configuration, data, deployment or
+     files outside the repository.
    - **Decide:** it judges the context sufficient only when it has no questions left.
 
    `acceptClarification` enforces this. It rejects the review, so the model gets a repair turn, when:
