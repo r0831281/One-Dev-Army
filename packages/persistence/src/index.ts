@@ -1158,3 +1158,78 @@ export class PgPhase3Repository {
     return Number(result.rows[0]?.last_seq ?? 0);
   }
 }
+
+export interface KnownImage {
+  sha256: string;
+  mediaType: string;
+  sizeBytes: number;
+}
+export interface StoredImage {
+  sha256: string;
+  mediaType: string;
+  bytes: Buffer;
+}
+/** Image bytes from task sources, keyed by source identity; the API writes them and the worker reads them by sha. */
+export class PgSourceImageStore {
+  constructor(
+    private readonly pool: Queryable,
+    private readonly workspaceId: string,
+  ) {}
+  /** The sha of each source ref already stored, so a sync downloads only new images. */
+  async known(refs: string[]): Promise<Map<string, KnownImage>> {
+    if (!refs.length) return new Map();
+    const rows = await this.pool.query<{
+      source_ref: string;
+      sha256: string;
+      media_type: string;
+      size_bytes: number;
+    }>(
+      "SELECT source_ref,sha256,media_type,size_bytes FROM source_images WHERE workspace_id=$1 AND source_ref=ANY($2::text[])",
+      [this.workspaceId, refs],
+    );
+    return new Map(
+      rows.rows.map((r) => [
+        r.source_ref,
+        { sha256: r.sha256, mediaType: r.media_type, sizeBytes: r.size_bytes },
+      ]),
+    );
+  }
+  async put(ref: string, mediaType: string, bytes: Uint8Array): Promise<string> {
+    const digest = createHash("sha256").update(bytes).digest("hex");
+    await this.pool.query(
+      "INSERT INTO source_images(workspace_id,source_ref,sha256,media_type,size_bytes,bytes) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING",
+      [this.workspaceId, ref, digest, mediaType, bytes.byteLength, Buffer.from(bytes)],
+    );
+    return digest;
+  }
+  async get(shas: string[]): Promise<StoredImage[]> {
+    if (!shas.length) return [];
+    const rows = await this.pool.query<{ sha256: string; media_type: string; bytes: Buffer }>(
+      "SELECT DISTINCT ON (sha256) sha256,media_type,bytes FROM source_images WHERE workspace_id=$1 AND sha256=ANY($2::text[])",
+      [this.workspaceId, shas],
+    );
+    return rows.rows.map((r) => ({ sha256: r.sha256, mediaType: r.media_type, bytes: r.bytes }));
+  }
+}
+export class MemorySourceImageStore {
+  readonly rows = new Map<string, StoredImage>();
+  async known(refs: string[]): Promise<Map<string, KnownImage>> {
+    return new Map(
+      refs.flatMap((ref) => {
+        const row = this.rows.get(ref);
+        return row
+          ? [[ref, { sha256: row.sha256, mediaType: row.mediaType, sizeBytes: row.bytes.byteLength }]]
+          : [];
+      }),
+    );
+  }
+  async put(ref: string, mediaType: string, bytes: Uint8Array): Promise<string> {
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    if (!this.rows.has(ref)) this.rows.set(ref, { sha256, mediaType, bytes: Buffer.from(bytes) });
+    return sha256;
+  }
+  async get(shas: string[]): Promise<StoredImage[]> {
+    const found = new Map([...this.rows.values()].map((row) => [row.sha256, row]));
+    return shas.flatMap((sha) => (found.has(sha) ? [found.get(sha)!] : []));
+  }
+}

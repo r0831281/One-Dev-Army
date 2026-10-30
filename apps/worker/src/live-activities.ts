@@ -3,10 +3,18 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Context } from "@temporalio/activity";
 import type { Pool } from "pg";
-import type { Clarification, Constraint, Plan, TaskContext } from "../../../packages/contracts/src/index.js";
+import {
+  taskImages,
+  type Clarification,
+  type Constraint,
+  type Plan,
+  type SourceImage,
+  type TaskContext,
+} from "../../../packages/contracts/src/index.js";
 import {
   canonicalSha256,
   PgPhase3Repository,
+  PgSourceImageStore,
   PgWorkflowRepository,
 } from "../../../packages/persistence/src/index.js";
 import {
@@ -78,6 +86,7 @@ const ROLE_GUIDANCE: Record<LiveRole, { practices: string[]; style: string[]; to
       "Investigate before asking. Never ask something the repository, the database or Odoo's standard behaviour can answer (which module, which field, current format, printer flow); look it up and cite it.",
       "Ask only what the requester alone can decide, such as business choices with no sensible default or a missing attachment, and only when the answer changes the implementation. Ask at most five questions, most important first.",
       "Turn everything else into a proposedAssumption with a concrete default an experienced Odoo developer would pick (for example: keep the existing printer and label stock, use the delivery address, ISO country name in the partner's language, wrap long lines). The requester can correct an assumption cheaply.",
+      "When the task has images, look at them first: a screenshot of an invoice, report or screen usually answers which document, layout or field is meant. Ask about it only if the images and the repository together leave it open.",
       "The repository is the customer's staging checkout for one Odoo version. If the task may target another version or checkout (for example an upgrade project prepared next to the current version, or a feature branch), ask which one instead of assuming.",
     ],
     style: [
@@ -188,15 +197,30 @@ export function createLiveActivities(pool: Pool, deps: LiveDependencies): LiveAc
 
     const reader = await deps.readerFor(input.repositoryRoot, input.context.repository.baseSha);
     const db = input.dataSource && deps.dbFor ? await deps.dbFor(input.dataSource).catch(() => null) : null;
-    const task = renderTask(input.context, input.constraints, [
-      reader
-        ? `REPOSITORY\nPinned base commit ${input.context.repository.baseSha}. Use the repository tools to inspect it.`
-        : "REPOSITORY\nNo repository was selected for this run, so the code cannot be inspected. Do not ask the requester where the code lives or how it currently works; record what you could not verify as assumptions and limit questions to requirements.",
-      db
-        ? `DATABASE\nA local copy of the customer's database (${input.dataSource!.database}) is available read-only through db_query.`
-        : "",
-      ...extraTask,
-    ]);
+    // Image bytes live in the shared store; an image the store no longer holds is listed as unavailable.
+    const listed = taskImages(input.context)?.images ?? [];
+    const loaded = new Map(
+      (
+        await new PgSourceImageStore(pool, input.workspaceId)
+          .get(listed.map((image) => image.sha256))
+          .catch(() => [])
+      ).map((row) => [row.sha256, row]),
+    );
+    const sent: SourceImage[] = listed.filter((image) => loaded.has(image.sha256));
+    const task = renderTask(
+      input.context,
+      input.constraints,
+      [
+        reader
+          ? `REPOSITORY\nPinned base commit ${input.context.repository.baseSha}. Use the repository tools to inspect it.`
+          : "REPOSITORY\nNo repository was selected for this run, so the code cannot be inspected. Do not ask the requester where the code lives or how it currently works; record what you could not verify as assumptions and limit questions to requirements.",
+        db
+          ? `DATABASE\nA local copy of the customer's database (${input.dataSource!.database}) is available read-only through db_query.`
+          : "",
+        ...extraTask,
+      ],
+      sent,
+    );
     const prompt = await compilePrompt({
       profile,
       soul: await loadSoul(input.role, profile.outputSchemaRef),
@@ -232,6 +256,11 @@ export function createLiveActivities(pool: Pool, deps: LiveDependencies): LiveAc
         structuredOutputRepairs: profile.retryPolicy.structuredOutputRepairs,
         system: prompt.messages[0]!.content,
         task: prompt.messages[1]!.content,
+        images: sent.map((image, i) => ({
+          label: `image ${i + 1}: ${image.name}`,
+          mediaType: image.mediaType,
+          data: loaded.get(image.sha256)!.bytes.toString("base64"),
+        })),
         tools: profile.tools,
         reader,
         db,

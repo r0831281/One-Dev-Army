@@ -1,6 +1,17 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
-import type { TaskContext } from "../../contracts/src/index.js";
-import { validateTaskContext } from "../../contracts/src/index.js";
+import type {
+  DiscussionMessage,
+  SourceImage,
+  TaskContext,
+  TaskDiscussion,
+  TaskImages,
+} from "../../contracts/src/index.js";
+import {
+  DISCUSSION_EXTENSION,
+  IMAGE_MEDIA_TYPES,
+  SOURCE_IMAGES_EXTENSION,
+  validateTaskContext,
+} from "../../contracts/src/index.js";
 
 export interface SourceRef {
   externalId: string;
@@ -17,6 +28,13 @@ export interface ConnectorContext {
    * Moving the pin to another repository or commit must yield a new context revision.
    */
   repositoryPinned?: boolean;
+  /** Where image bytes are kept; without it the connector reads no images. */
+  images?: ImageStore;
+}
+/** Content store for source images, keyed by a source ref that includes the image's version. */
+export interface ImageStore {
+  known(refs: string[]): Promise<Map<string, { sha256: string; mediaType: string; sizeBytes: number }>>;
+  put(ref: string, mediaType: string, bytes: Uint8Array): Promise<string>;
 }
 export interface TaskPlanning {
   plannedFor: string | null;
@@ -27,6 +45,8 @@ export interface TaskPlanning {
 export const TEMPO_PLANNING_EXTENSION = "community.tempo.planning";
 export interface ScopedHttp {
   request<T>(request: { method: string; url: string; body?: unknown }): Promise<T>;
+  /** Raw bytes of a GET response, refused above maxBytes. Only GET-scoped transports offer it. */
+  download?(request: { method: "GET"; url: string }, maxBytes: number): Promise<Uint8Array>;
 }
 export interface TaskConnector {
   normalize(identifierOrPayload: string | Record<string, unknown>): SourceRef;
@@ -73,6 +93,12 @@ function base(
   let revision = fields.sourceRevision;
   if (revision !== null && context.planning) revision = `${revision}|plan:${tag(context.planning)}`;
   if (revision !== null && context.repositoryPinned) revision = `${revision}|repo:${tag(context.repository)}`;
+  // Odoo chatter does not touch write_date, so a new or edited message must change the revision itself.
+  const discussion = fields.extensions?.[DISCUSSION_EXTENSION];
+  const images = fields.extensions?.[SOURCE_IMAGES_EXTENSION];
+  if (revision !== null && discussion)
+    revision = `${revision}|talk:${tag(images ? { discussion, images } : discussion)}`;
+  else if (revision !== null && images) revision = `${revision}|images:${tag(images)}`;
   return validateTaskContext({
     schemaVersion: "1.0",
     taskId: randomUUID(),
@@ -100,6 +126,152 @@ function base(
     },
     ...(extensions ? { extensions } : {}),
   });
+}
+
+/** Newest messages fetched per task; older ones are counted as omitted. */
+const DISCUSSION_FETCH = 50;
+const DISCUSSION_MESSAGE_CHARS = 4_000;
+const DISCUSSION_TOTAL_CHARS = 40_000;
+/**
+ * Bounds a discussion before it is stored and sent to the model: keeps the newest messages within the size caps and
+ * returns them oldest first.
+ */
+export function boundDiscussion(newestFirst: DiscussionMessage[], total: number): TaskDiscussion {
+  const kept: DiscussionMessage[] = [];
+  let chars = 0;
+  for (const message of newestFirst) {
+    const text = message.text.trim() || (message.attachmentIds?.length ? "(attachment only)" : "");
+    if (!text) {
+      total--;
+      continue;
+    }
+    const clipped =
+      text.length > DISCUSSION_MESSAGE_CHARS ? `${text.slice(0, DISCUSSION_MESSAGE_CHARS)}…` : text;
+    if (chars + clipped.length > DISCUSSION_TOTAL_CHARS) break;
+    chars += clipped.length;
+    kept.push({ ...message, text: clipped });
+  }
+  return { messages: kept.reverse(), omitted: Math.max(0, total - kept.length) };
+}
+/** Errors that will not clear on the next sync: the source refuses or cannot answer the comment read. */
+const PERMANENT_DISCUSSION_ERRORS = /^CONNECTOR_(HTTP_40[0134]|REMOTE_ERROR|SCOPE_DENIED)$/;
+/**
+ * A permanent comment-read failure keeps the task readable and tells the agents the comments are missing. Transient
+ * failures are rethrown so the sync keeps the last good context instead of storing a revision without comments.
+ */
+function unavailableDiscussion(error: unknown): TaskDiscussion {
+  const code = error instanceof Error ? error.message : "";
+  if (!PERMANENT_DISCUSSION_ERRORS.test(code)) throw error;
+  return { messages: [], omitted: 0, unavailable: code };
+}
+
+/** At most this many images go to the model per task; each is also bounded in bytes. */
+const MAX_IMAGES = 8;
+const MAX_IMAGE_BYTES = 3_750_000;
+const MAX_IMAGE_TOTAL_BYTES = 12_000_000;
+const MAX_MISSING_LISTED = 20;
+interface ImageCandidate {
+  sourceId: string;
+  /** Store key: the source id plus a version, so a changed image is fetched again. */
+  ref: string;
+  name: string;
+  mediaType: string;
+  sizeBytes: number | null;
+  origin: SourceImage["origin"];
+  messageAt?: string | null;
+  load(): Promise<Uint8Array>;
+}
+const isImageType = (type: string): type is SourceImage["mediaType"] =>
+  (IMAGE_MEDIA_TYPES as readonly string[]).includes(type);
+/** Magic bytes, so a mislabelled attachment never reaches the model as the wrong media type. */
+function sniffImage(bytes: Uint8Array): SourceImage["mediaType"] | null {
+  const b = bytes;
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return "image/png";
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return "image/jpeg";
+  if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) return "image/gif";
+  if (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 && b[8] === 0x57 && b[9] === 0x45)
+    return "image/webp";
+  return null;
+}
+/**
+ * Picks the images to send, in priority order, downloading only those the store does not hold yet. Permanent read
+ * failures become "missing" entries; transient ones are rethrown so the sync keeps the last good context.
+ */
+export async function collectImages(
+  candidates: ImageCandidate[],
+  store: ImageStore,
+  missing: TaskImages["missing"] = [],
+): Promise<TaskImages> {
+  const images: SourceImage[] = [];
+  const skip = (name: string, reason: string) => missing.push({ name, reason });
+  const eligible: ImageCandidate[] = [];
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    if (seen.has(candidate.sourceId)) continue;
+    seen.add(candidate.sourceId);
+    if (!isImageType(candidate.mediaType))
+      skip(candidate.name, `${candidate.mediaType || "unknown type"}, only images are sent`);
+    else if ((candidate.sizeBytes ?? 0) > MAX_IMAGE_BYTES) skip(candidate.name, "too large");
+    else if (eligible.length >= MAX_IMAGES) skip(candidate.name, `over the ${MAX_IMAGES}-image limit`);
+    else eligible.push(candidate);
+  }
+  let known: Awaited<ReturnType<ImageStore["known"]>>;
+  try {
+    known = await store.known(eligible.map((c) => c.ref));
+  } catch {
+    return { images: [], missing: [], unavailable: "IMAGE_STORE_FAILED" };
+  }
+  let total = 0;
+  for (const candidate of eligible) {
+    const stored = known.get(candidate.ref);
+    let sha = stored?.sha256;
+    let size = stored?.sizeBytes ?? 0;
+    let mediaType = (stored?.mediaType ?? candidate.mediaType) as SourceImage["mediaType"];
+    if (!sha) {
+      let bytes: Uint8Array;
+      try {
+        bytes = await candidate.load();
+      } catch (error) {
+        const code = error instanceof Error ? error.message : "";
+        if (!PERMANENT_DISCUSSION_ERRORS.test(code) && code !== "IMAGE_TOO_LARGE" && code !== "NOT_FOUND")
+          throw error;
+        skip(candidate.name, code === "IMAGE_TOO_LARGE" ? "too large" : `could not be read (${code})`);
+        continue;
+      }
+      const sniffed = sniffImage(bytes);
+      if (!sniffed) {
+        skip(candidate.name, "not a readable image");
+        continue;
+      }
+      if (bytes.byteLength > MAX_IMAGE_BYTES) {
+        skip(candidate.name, "too large");
+        continue;
+      }
+      mediaType = sniffed;
+      size = bytes.byteLength;
+      try {
+        sha = await store.put(candidate.ref, mediaType, bytes);
+      } catch {
+        return { images: [], missing: [], unavailable: "IMAGE_STORE_FAILED" };
+      }
+    }
+    if (total + size > MAX_IMAGE_TOTAL_BYTES) {
+      skip(candidate.name, "over the total image size limit");
+      continue;
+    }
+    total += size;
+    images.push({
+      ref: candidate.ref,
+      sourceId: candidate.sourceId,
+      sha256: sha,
+      name: candidate.name.slice(0, 200),
+      mediaType,
+      sizeBytes: size,
+      origin: candidate.origin,
+      ...(candidate.messageAt !== undefined ? { messageAt: candidate.messageAt } : {}),
+    });
+  }
+  return { images, missing: missing.slice(0, MAX_MISSING_LISTED) };
 }
 
 export class FakeConnector implements TaskConnector {
@@ -289,7 +461,15 @@ interface JiraIssue {
     updated: string;
     project: { key: string };
     reporter: { accountId: string; displayName: string } | null;
+    attachment?: JiraAttachment[];
   };
+}
+interface JiraAttachment {
+  id: string;
+  filename: string;
+  mimeType: string;
+  size: number;
+  created: string;
 }
 /** Field names that hold the customer, most specific first: JSM organizations, a custom customer field, Tempo account. */
 const JIRA_CUSTOMER_FIELDS = [
@@ -321,11 +501,14 @@ export function jiraCustomer(
 interface JiraComment {
   id: string;
   body: unknown;
+  created?: string;
+  author?: { displayName?: string } | null;
+  jsdPublic?: boolean;
 }
 function adfText(value: unknown): string {
   if (!value || typeof value !== "object") return "";
   const node = value as { text?: unknown; content?: unknown[]; type?: unknown };
-  const own = typeof node.text === "string" ? node.text : "";
+  const own = typeof node.text === "string" ? node.text : node.type === "media" ? "[image]" : "";
   const children = Array.isArray(node.content) ? node.content.map(adfText).join("") : "";
   return own + children + (["paragraph", "heading", "listItem"].includes(String(node.type)) ? "\n" : "");
 }
@@ -352,6 +535,8 @@ export class JiraConnector implements TaskConnector {
     });
     if (issue.fields.project.key !== this.projectKey) throw new Error("POLICY_DENIED");
     const customer = jiraCustomer(issue.fields, issue.names);
+    const discussion = await this.discussion(issue.key);
+    const images = await this.images(issue, context.images);
     const planningValue = issue.fields[this.planningField];
     const plannedFor =
       typeof planningValue === "string" && /^\d{4}-\d{2}-\d{2}$/.test(planningValue) ? planningValue : null;
@@ -379,9 +564,68 @@ export class JiraConnector implements TaskConnector {
             field: this.planningField,
           },
           ...(customer ? { "community.jira.customer": customer } : {}),
+          [DISCUSSION_EXTENSION]: discussion,
+          ...(images ? { [SOURCE_IMAGES_EXTENSION]: images } : {}),
         },
       },
     );
+  }
+  /** Attachments of the issue, newest first; those shown in the description (by file name) come first. */
+  private async images(issue: JiraIssue, store: ImageStore | undefined): Promise<TaskImages | null> {
+    const download = this.http.download?.bind(this.http);
+    if (!store || !download) return null;
+    const inDescription = new Set<string>();
+    const walk = (value: unknown) => {
+      if (!value || typeof value !== "object") return;
+      const node = value as { type?: unknown; attrs?: { alt?: unknown }; content?: unknown[] };
+      if (node.type === "media" && typeof node.attrs?.alt === "string") inDescription.add(node.attrs.alt);
+      if (Array.isArray(node.content)) node.content.forEach(walk);
+    };
+    walk(issue.fields.description);
+    const attachments = (Array.isArray(issue.fields.attachment) ? issue.fields.attachment : [])
+      .filter((a) => typeof a?.id === "string" && /^\d+$/.test(a.id))
+      .sort((a, b) => b.created.localeCompare(a.created));
+    const candidate = (a: JiraAttachment): ImageCandidate => ({
+      sourceId: `jira:${a.id}`,
+      // Jira attachment content never changes; a new upload gets a new id.
+      ref: `jira:${a.id}`,
+      name: a.filename,
+      mediaType: a.mimeType,
+      sizeBytes: a.size,
+      origin: inDescription.has(a.filename) ? "description" : "attachment",
+      load: () =>
+        download(
+          { method: "GET", url: `${this.origin}/rest/api/3/attachment/content/${a.id}?redirect=false` },
+          MAX_IMAGE_BYTES,
+        ),
+    });
+    return collectImages(
+      [
+        ...attachments.filter((a) => inDescription.has(a.filename)).map(candidate),
+        ...attachments.filter((a) => !inDescription.has(a.filename)).map(candidate),
+      ],
+      store,
+    );
+  }
+  private async discussion(key: string): Promise<TaskDiscussion> {
+    try {
+      const page = await this.http.request<{ comments?: JiraComment[]; total?: number }>({
+        method: "GET",
+        url: `${this.issueUrl({ externalId: key, key })}/comment?orderBy=-created&maxResults=${DISCUSSION_FETCH}`,
+      });
+      const comments = Array.isArray(page.comments) ? page.comments : [];
+      return boundDiscussion(
+        comments.map((comment) => ({
+          author: comment.author?.displayName ?? null,
+          at: comment.created ?? "",
+          kind: comment.jsdPublic === false ? "internal" : "comment",
+          text: adfText(comment.body),
+        })),
+        Math.max(comments.length, typeof page.total === "number" ? page.total : 0),
+      );
+    } catch (error) {
+      return unavailableDiscussion(error);
+    }
   }
   private issueUrl(ref: SourceRef): string {
     if (!new RegExp(`^${this.projectKey}-[1-9]\\d*$`).test(ref.key)) throw new Error("POLICY_DENIED");
@@ -469,6 +713,7 @@ export function htmlText(value: unknown): string {
   if (typeof value !== "string") return "";
   return value
     .replace(/<(script|style)\b[\s\S]*?<\/\1\s*>/gi, "")
+    .replace(/<img\b[^>]*>/gi, "[image]")
     .replace(/<li\b[^>]*>/gi, "\n- ")
     .replace(/<br\s*\/?>|<\/(p|div|h[1-6]|tr|blockquote|pre|ul|ol)\s*>/gi, "\n")
     .replace(/<[^>]*>/g, "")
@@ -500,6 +745,22 @@ interface OdooTask {
   partner_id?: [number, string] | false;
   date_deadline: string | false;
   [field: string]: unknown;
+}
+interface OdooMessage {
+  id: number;
+  date: string;
+  author_id: [number, string] | false;
+  body: string | false;
+  message_type: string;
+  attachment_ids?: number[];
+}
+interface OdooAttachment {
+  id: number;
+  name: string;
+  mimetype: string;
+  file_size: number;
+  checksum: string | false;
+  create_date: string;
 }
 interface JsonRpcReply<T> {
   result?: T;
@@ -535,23 +796,16 @@ export class OdooConnector implements TaskConnector {
     }
     return reply.result;
   }
-  private async searchTasks(key: string): Promise<OdooTask[]> {
-    const domain = [[this.options.keyField, "=", key]];
-    const fields = [
-      "id",
-      "name",
-      "description",
-      "write_date",
-      "project_id",
-      "date_deadline",
-      "partner_id",
-      this.options.keyField,
-    ];
+  private async searchRead<T>(
+    model: "project.task" | "mail.message" | "ir.attachment",
+    domain: unknown[][],
+    options: { fields: string[]; limit: number; order?: string },
+  ): Promise<T[]> {
     if (this.options.apiVersion === "json2")
-      return this.http.request<OdooTask[]>({
+      return this.http.request<T[]>({
         method: "POST",
-        url: `${this.origin}/json/2/project.task/search_read`,
-        body: { domain, fields, limit: 2 },
+        url: `${this.origin}/json/2/${model}/search_read`,
+        body: { domain, ...options },
       });
     this.uid ??= await this.rpc<number | false>("common", "login", [
       this.options.database,
@@ -561,15 +815,170 @@ export class OdooConnector implements TaskConnector {
       if (typeof uid !== "number") throw new Error("CONNECTOR_HTTP_401");
       return uid;
     });
-    return this.rpc<OdooTask[]>("object", "execute_kw", [
+    return this.rpc<T[]>("object", "execute_kw", [
       this.options.database,
       this.uid,
       null,
-      "project.task",
+      model,
       "search_read",
       [domain],
-      { fields, limit: 2 },
+      options,
     ]);
+  }
+  private searchTasks(key: string): Promise<OdooTask[]> {
+    return this.searchRead<OdooTask>("project.task", [[this.options.keyField, "=", key]], {
+      fields: [
+        "id",
+        "name",
+        "description",
+        "write_date",
+        "project_id",
+        "date_deadline",
+        "partner_id",
+        this.options.keyField,
+      ],
+      limit: 2,
+    });
+  }
+  /** Chatter messages and emails on the task; tracking and system notifications are left out. */
+  private async discussion(taskId: number): Promise<TaskDiscussion> {
+    try {
+      const domain = [
+        ["model", "=", "project.task"],
+        ["res_id", "=", taskId],
+        ["message_type", "in", ["comment", "email"]],
+      ];
+      const messages = await this.searchRead<OdooMessage>("mail.message", domain, {
+        fields: ["id", "date", "author_id", "body", "message_type", "attachment_ids"],
+        order: "id desc",
+        limit: DISCUSSION_FETCH + 1,
+      });
+      const shown = messages.slice(0, DISCUSSION_FETCH);
+      // Logged notes are internal through their subtype; is_internal only marks explicitly hidden messages. The
+      // labels are a refinement, so a failed lookup keeps the messages with their plain comment/email labels.
+      const internal = new Set<number>();
+      if (shown.length)
+        try {
+          for (const { id } of await this.searchRead<{ id: number }>(
+            "mail.message",
+            [
+              ...domain,
+              ["id", "in", shown.map((m) => m.id)],
+              "|",
+              ["is_internal", "=", true],
+              ["subtype_id.internal", "=", true],
+            ] as unknown[][],
+            { fields: ["id"], limit: DISCUSSION_FETCH },
+          ))
+            internal.add(id);
+        } catch {
+          internal.clear();
+        }
+      return boundDiscussion(
+        shown.map((message) => ({
+          author: message.author_id ? message.author_id[1] : null,
+          at: message.date,
+          kind: internal.has(message.id)
+            ? "internal"
+            : message.message_type === "email"
+              ? "email"
+              : "comment",
+          text: htmlText(message.body),
+          ...(message.attachment_ids?.length
+            ? { attachmentIds: message.attachment_ids.map((id) => `odoo:${id}`) }
+            : {}),
+        })),
+        // One extra row only says that more exist; the exact count would need another call, so omitted is a floor.
+        shown.length + (messages.length > DISCUSSION_FETCH ? 1 : 0),
+      );
+    } catch (error) {
+      return unavailableDiscussion(error);
+    }
+  }
+  /**
+   * Images of the task: those embedded in the description first, then those attached to chatter messages (newest
+   * first), then other image attachments. Only attachments linked to this task are read.
+   */
+  private async images(
+    task: OdooTask,
+    discussion: TaskDiscussion,
+    store: ImageStore | undefined,
+  ): Promise<TaskImages | null> {
+    if (!store) return null;
+    const pinned = [
+      ["res_model", "=", "project.task"],
+      ["res_id", "=", task.id],
+    ];
+    const missing: TaskImages["missing"] = [];
+    const candidates: ImageCandidate[] = [];
+    const html = typeof task.description === "string" ? task.description : "";
+    // Pasted images can stay inline as data URIs; they need no request.
+    let inline = 0;
+    for (const match of html.matchAll(
+      /src\s*=\s*["']data:(image\/[a-z+.-]+);base64,([A-Za-z0-9+/=\s]+)["']/gi,
+    )) {
+      const bytes = Buffer.from(match[2]!.replace(/\s+/g, ""), "base64");
+      const digest = createHash("sha256").update(bytes).digest("hex");
+      candidates.push({
+        sourceId: `data:${digest}`,
+        ref: `data:${digest}`,
+        name: `description image ${++inline}`,
+        mediaType: match[1]!.toLowerCase(),
+        sizeBytes: bytes.byteLength,
+        origin: "description",
+        load: async () => bytes,
+      });
+    }
+    const embedded = [...html.matchAll(/\/web\/(?:image|content)\/(\d+)/g)].map((m) => Number(m[1]));
+    let listed: OdooAttachment[];
+    try {
+      listed = await this.searchRead<OdooAttachment>(
+        "ir.attachment",
+        // Non-image files are listed too, so the agents learn that a PDF or spreadsheet exists but was not sent.
+        pinned,
+        {
+          fields: ["id", "name", "mimetype", "file_size", "checksum", "create_date"],
+          order: "id desc",
+          limit: 50,
+        },
+      );
+    } catch (error) {
+      const code = error instanceof Error ? error.message : "";
+      if (!PERMANENT_DISCUSSION_ERRORS.test(code)) throw error;
+      return { images: [], missing: [], unavailable: code };
+    }
+    const byId = new Map(listed.map((a) => [a.id, a]));
+    const postedAt = new Map<number, string>();
+    for (const message of discussion.messages)
+      for (const id of message.attachmentIds ?? [])
+        postedAt.set(Number(id.slice("odoo:".length)), message.at);
+    const candidate = (a: OdooAttachment, origin: SourceImage["origin"]): ImageCandidate => ({
+      sourceId: `odoo:${a.id}`,
+      ref: `odoo:${a.id}:${a.checksum || a.create_date}`,
+      name: a.name,
+      mediaType: a.mimetype,
+      sizeBytes: a.file_size,
+      origin,
+      ...(origin === "discussion" ? { messageAt: postedAt.get(a.id) ?? null } : {}),
+      load: async () => {
+        const [row] = await this.searchRead<{ datas: string | false }>(
+          "ir.attachment",
+          [...pinned, ["id", "=", a.id]],
+          { fields: ["datas"], limit: 1 },
+        );
+        if (!row?.datas) throw new Error("NOT_FOUND");
+        if (row.datas.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4 + 4) throw new Error("IMAGE_TOO_LARGE");
+        return Buffer.from(row.datas, "base64");
+      },
+    });
+    for (const id of embedded) {
+      const found = byId.get(id);
+      if (found) candidates.push(candidate(found, "description"));
+      else missing.push({ name: `description image ${id}`, reason: "not linked to this task" });
+    }
+    for (const a of listed) if (postedAt.has(a.id)) candidates.push(candidate(a, "discussion"));
+    for (const a of listed) candidates.push(candidate(a, "attachment"));
+    return collectImages(candidates, store, missing);
   }
   async fetchTask(ref: SourceRef, context: ConnectorContext): Promise<TaskContext> {
     const key = this.normalize(ref.key).key;
@@ -578,6 +987,8 @@ export class OdooConnector implements TaskConnector {
     if (tasks.length > 1) throw new Error("AMBIGUOUS_SOURCE_KEY");
     const task = tasks[0]!;
     if (task[this.options.keyField] !== key) throw new Error("POLICY_DENIED");
+    const discussion = await this.discussion(task.id);
+    const images = await this.images(task, discussion, context.images);
     return base(
       context,
       { externalId: String(task.id), key },
@@ -598,6 +1009,8 @@ export class OdooConnector implements TaskConnector {
             deadline: task.date_deadline || null,
             customer: task.partner_id ? task.partner_id[1] : null,
           },
+          [DISCUSSION_EXTENSION]: discussion,
+          ...(images ? { [SOURCE_IMAGES_EXTENSION]: images } : {}),
         },
       },
     );

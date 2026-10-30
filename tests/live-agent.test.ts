@@ -349,3 +349,33 @@ test("the transport caches the conversation and sends fallbacks only where suppo
   assert.equal("fallbacks" in sent[1]!, false);
   assert.equal("betas" in sent[1]!, false);
 });
+
+test("task images follow the task text as labelled image blocks", async () => {
+  const { turn, inputs } = scripted([
+    message(
+      [
+        {
+          type: "text",
+          text: JSON.stringify({
+            sufficient: true,
+            questions: [],
+            proposedAssumptions: [],
+            relevantPaths: [],
+          }),
+        },
+      ],
+      "end_turn",
+    ),
+  ]);
+  await runAgent({
+    ...base,
+    images: [{ label: "image 1: invoice.png", mediaType: "image/png", data: "iVBORw0KGgo=" }],
+    modelTurn: turn,
+    accept: (value) => acceptClarification(value, reader),
+  });
+  assert.deepEqual(inputs[0]!.messages[0]!.content, [
+    { type: "text", text: base.task },
+    { type: "text", text: "image 1: invoice.png" },
+    { type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" } },
+  ]);
+});
