@@ -430,7 +430,10 @@ optional `idempotency-key` header. The API builds the v3 manifest itself. Then:
    - **Analyse:** it lists the requirements (`R1`, `R2`, …), including changes asked for in later comments. Each
      requirement cites its sources. It compares each requirement with the current code and marks it `new`,
      `partial` or `implemented`, citing the files, or `external` when it concerns configuration, data, deployment or
-     files outside the repository.
+     files outside the repository. It compares dates: the task text includes the 15 most recent commits at the pinned
+     commit, and `repo_history` lists the commits touching one path, so a fix made after the message that asked for
+     it is marked `implemented` instead of being planned again. Without a repository, every requirement is
+     `unverified` or `external`.
    - **Decide:** it judges the context sufficient only when it has no questions left.
 
    `acceptClarification` enforces this. It rejects the review, so the model gets a repair turn, when:
@@ -440,7 +443,9 @@ optional `idempotency-key` header. The API builds the v3 manifest itself. Then:
    - the review says sufficient but still asks questions.
 
    The accepted review is handed to the planner as a `CONTEXT BRIEF`, assumptions included. The planner plans only
-   `new` and `partial` requirements, and its `acceptanceMapping` must name each one. The plan gate shows the brief.
+   `new`, `partial` and `external` requirements (an `external` one as operational steps: where, what to set or
+   install, how to check it), and `acceptPlan` rejects a plan whose `acceptanceMapping` does not name each one. An
+   `implemented` requirement gets at most one verification step. The plan gate shows the brief.
    If the reviewer has questions, a **clarification gate** opens:
    - **Send answers:** the review runs again with your answers.
    - **Accept assumptions:** the proposed assumptions are adopted and the run moves on to planning.
@@ -464,8 +469,9 @@ optional `idempotency-key` header. The API builds the v3 manifest itself. Then:
   customer, its Jira title or an explicit key-prefix mapping (**Settings → Repositories**, now only an override).
   Customer names must match as whole words, so "Parkside" never matches `ark`. You can change the environment, the
   branch (default: the local `staging` branch) and the database copy.
-- **Repository access.** Agents read the chosen branch through `git show`, `git grep` and `git ls-tree`, at the
-  commit pinned when the run starts. The working tree is never touched. Without an environment, the run uses the
+- **Repository access.** Agents read the chosen branch through `git show`, `git grep`, `git ls-tree` and `git log`
+  (tools `repo_read`, `repo_search`, `repo_list` and `repo_history`, in `packages/sandboxes/src/repo-read.ts`), at the
+  commit pinned when the run starts. `repo_history` returns at most 50 commits up to the pinned commit. The working tree is never touched. Without an environment, the run uses the
   task text only.
 - **Data access.** Off by default; tick **Let agents query this database** to turn it on for one run. The agents then
   get `db_query` (`packages/sandboxes/src/db-read.ts`):
@@ -483,8 +489,8 @@ optional `idempotency-key` header. The API builds the v3 manifest itself. Then:
 `~/Library/Application Support/O-D-A/run-worker.sh`. The API never holds the key; it learns only the variable name
 through `ODA_WORKER_CREDENTIALS`, set by `run-api.sh`.
 
-**Data egress.** Task text, the task's discussion, your answers and the repository excerpts the agent reads are sent
-to Anthropic. Nothing else is sent. The discussion is the newest Jira comments (Jira Service Management internal
+**Data egress.** Task text, the task's discussion and images, your answers, the repository excerpts and commit history
+the agent reads, and `db_query` results (when enabled) are sent to Anthropic. Nothing else is sent. The discussion is the newest Jira comments (Jira Service Management internal
 comments included) or Odoo chatter messages, emails and logged notes (tracking messages excluded): at most 50
 messages, 4,000 characters each and 40,000 in all, stored in `extensions["community.source.discussion"]`. If the
 source refuses the comment read (401, 403, 404 or an Odoo RPC error), the task is still stored and the agents are told
