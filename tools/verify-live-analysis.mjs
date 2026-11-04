@@ -1,5 +1,7 @@
-// Drives a workflow v3 (live analyse-and-plan) run through real Temporal and Postgres with a scripted model,
-// so no provider is called and nothing is spent. Uses its own task queue and workspace.
+// Drives workflow v3 (live analyse-and-plan) runs through real Temporal and Postgres with a scripted model, so no
+// provider is called and nothing is spent. Uses its own task queue and workspace. Besides the gate path it checks
+// that a crashed step reaches the recovery gate, that cancelling a run stops the running model call, and that a
+// budget running out during a step fails that step cleanly.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -77,20 +79,50 @@ const reply = (content, stop_reason) => ({
   usage,
 });
 const text = (value) => reply([{ type: "text", text: JSON.stringify(value) }], "end_turn");
+// A partial requirement must cite a file the reviewer read in that review.
+const readSale = (id) =>
+  reply(
+    [
+      {
+        type: "tool_use",
+        id,
+        name: "repo_read",
+        input: { path: "addons/sale_custom/models/sale.py", startLine: null, endLine: null },
+      },
+    ],
+    "tool_use",
+  );
+// The task's only part is its description; the review must account for it.
+const requirement = {
+  id: "R1",
+  text: "Change the discount compute",
+  sources: ["description"],
+  status: "partial",
+  evidence: "SaleOrder exists but has no discount rule.",
+  paths: ["addons/sale_custom/models/sale.py"],
+};
 const script = [
-  // Review 1: reads code, then asks a question.
+  // Review 1: searches and reads the code, then asks a question.
   reply(
     [{ type: "tool_use", id: "t1", name: "repo_search", input: { pattern: "SaleOrder", pathGlob: null } }],
     "tool_use",
   ),
+  readSale("t2"),
   text({
+    requirements: [requirement],
+    noAction: [],
+    findings: ["The discount is computed in SaleOrder."],
     sufficient: false,
     questions: ["Which price list applies?"],
     proposedAssumptions: [],
     relevantPaths: ["addons/sale_custom/models/sale.py"],
   }),
-  // Review 2 after the human answers: sufficient.
+  // Review 2 after the human answers: reads the code again (a new step), then sufficient.
+  readSale("t3"),
   text({
+    requirements: [requirement],
+    noAction: [],
+    findings: ["The discount is computed in SaleOrder."],
     sufficient: true,
     questions: [],
     proposedAssumptions: [],
@@ -99,24 +131,44 @@ const script = [
   // Plan revision 1, then revision 2 after feedback.
   text({
     title: "Plan v1",
-    steps: [{ id: "step-1", title: "Patch", description: "Change compute", tests: ["Unit test"] }],
-    acceptanceMapping: [],
+    steps: [{ id: "S1", title: "Patch", description: "Change compute", tests: ["Unit test"] }],
+    acceptanceMapping: ["R1 → S1"],
     risks: [],
   }),
   text({
     title: "Plan v2",
-    steps: [{ id: "step-1", title: "Patch", description: "Change compute, keep API", tests: ["Unit test"] }],
-    acceptanceMapping: [],
+    steps: [{ id: "S1", title: "Patch", description: "Change compute, keep API", tests: ["Unit test"] }],
+    acceptanceMapping: ["R1 → S1"],
     risks: ["None"],
   }),
 ];
 const seen = [];
+// Script entries are replies, or functions of the turn input for calls that hang or change state first.
 const modelTurn = async (input) => {
   seen.push(input.messages.at(0)?.content ?? "");
   const next = script.shift();
   if (!next) throw new Error("SCRIPT_EXHAUSTED");
-  return next;
+  return typeof next === "function" ? next(input) : next;
 };
+const sufficientReview = () =>
+  text({
+    requirements: [{ ...requirement, status: "new", evidence: "No discount rule exists yet.", paths: [] }],
+    noAction: [],
+    findings: [],
+    sufficient: true,
+    questions: [],
+    proposedAssumptions: [],
+    relevantPaths: ["addons/sale_custom/models/sale.py"],
+  });
+const simplePlan = () =>
+  text({
+    title: "Plan",
+    steps: [{ id: "S1", title: "Patch", description: "Change compute", tests: ["Unit test"] }],
+    acceptanceMapping: ["R1 → S1"],
+    risks: [],
+  });
+// One-shot fault: the next step fails before its agent loop starts, as if the worker lost the repository.
+let crashNextReader = false;
 
 const pool = new Pool({ connectionString: databaseUrl });
 const connection = await Connection.connect({ address: temporalAddress });
@@ -137,7 +189,13 @@ const worker = await Worker.create({
     ...createPersistentActivities(pool),
     ...createLiveActivities(pool, {
       modelTurn,
-      readerFor: (root, sha) => createRepoReader({ root, baseSha: sha }),
+      readerFor: async (root, sha) => {
+        if (crashNextReader) {
+          crashNextReader = false;
+          throw new Error("simulated worker fault");
+        }
+        return createRepoReader({ root, baseSha: sha });
+      },
     }),
   },
 });
@@ -146,13 +204,16 @@ const running = worker.run();
 const control = new RunControlService(pool, gateway, workspaceId, workspaceId);
 async function waitFor(runId, predicate, label) {
   const deadline = Date.now() + 60_000;
+  let run;
   while (Date.now() < deadline) {
     await control.dispatchPending().catch(() => undefined);
-    const run = await control.runs.get(runId);
+    run = await control.runs.get(runId);
     if (run && predicate(run.projection)) return run;
     await new Promise((r) => setTimeout(r, 200));
   }
-  throw new Error(`timeout:${label}`);
+  throw new Error(
+    `timeout:${label} (state ${run?.projection.state ?? "none"}, gate ${run?.projection.currentGate?.kind ?? "none"})`,
+  );
 }
 const decide = (run, decision, reason) =>
   control.submitDecision({
@@ -180,16 +241,23 @@ try {
   const fixture = JSON.parse(
     await readFile("packages/contracts/fixtures/task-context.compatible.json", "utf8"),
   );
-  const taskId = randomUUID();
-  const context = {
-    ...fixture,
-    taskId,
-    revision: 1,
-    source: { ...fixture.source, instanceId, externalId: "44", key: "ABC-44", revision: taskId },
-    repository: { id: repositoryId, baseSha },
-    title: "Rounding error on sale order totals",
+  let taskNumber = 43;
+  const newTask = async () => {
+    const taskId = randomUUID();
+    const key = `ABC-${++taskNumber}`;
+    const context = {
+      ...fixture,
+      taskId,
+      revision: 1,
+      source: { ...fixture.source, instanceId, externalId: String(taskNumber), key, revision: taskId },
+      repository: { id: repositoryId, baseSha },
+      title: "Rounding error on sale order totals",
+    };
+    await new PgTaskRepository(pool).ingest(workspaceId, context, null, "a".repeat(64));
+    await control.horizon.setOverride(taskId, true, "verification");
+    return context;
   };
-  await new PgTaskRepository(pool).ingest(workspaceId, context, null, "a".repeat(64));
+  const context = await newTask();
   const phase3 = new PgPhase3Repository(pool);
   const assignments = {};
   for (const role of ["context-reviewer", "planner"]) {
@@ -228,18 +296,36 @@ try {
     },
     assignments,
   ]);
-  await control.horizon.setOverride(taskId, true, "verification");
   process.env.ODA_WORKER_CREDENTIALS = "ANTHROPIC_API_KEY";
-  const manifest = createRunManifest({
-    taskId,
-    contextRevision: 1,
-    repositoryId,
-    baseSha,
-    policyHash: "c".repeat(64),
-    profileRevisions: { "context-reviewer": 1, planner: 1 },
-    workflowVersion: 3,
-  });
-  const started = await control.requestStart(randomUUID(), { manifest, context, repositoryRoot: repoRoot });
+  const startRun = (task) =>
+    control.requestStart(randomUUID(), {
+      manifest: createRunManifest({
+        taskId: task.taskId,
+        contextRevision: 1,
+        repositoryId,
+        baseSha,
+        policyHash: "c".repeat(64),
+        profileRevisions: { "context-reviewer": 1, planner: 1 },
+        workflowVersion: 3,
+      }),
+      context: task,
+      repositoryRoot: repoRoot,
+    });
+  const stepStates = async (runId) =>
+    (
+      await pool.query(
+        "SELECT step_key,logical_iteration,state FROM agent_steps WHERE run_id=$1 ORDER BY step_key,logical_iteration",
+        [runId],
+      )
+    ).rows.map((s) => `${s.step_key}#${s.logical_iteration}:${s.state}`);
+  const openReservations = async (runId) =>
+    (
+      await pool.query(
+        "SELECT count(*)::int AS n FROM usage_reservations WHERE run_id=$1 AND state='RESERVED'",
+        [runId],
+      )
+    ).rows[0].n;
+  const started = await startRun(context);
 
   let run = await waitFor(started.runId, (p) => p.currentGate?.kind === "CLARIFICATION", "clarification");
   assert.deepEqual(run.projection.currentGate.proposal.questions, ["Which price list applies?"]);
@@ -259,32 +345,95 @@ try {
   assert.equal(run.projection.plan.title, "Plan v2");
   await decide(run, "APPROVE");
   run = await waitFor(started.runId, (p) => p.state === "COMPLETED", "completed");
+  const completed = run;
 
-  const steps = await pool.query(
-    "SELECT step_key,logical_iteration,state FROM agent_steps WHERE run_id=$1 ORDER BY step_key,logical_iteration",
-    [started.runId],
-  );
-  assert.deepEqual(
-    steps.rows.map((s) => `${s.step_key}#${s.logical_iteration}:${s.state}`),
-    [
-      "context-reviewer#1:COMPLETED",
-      "context-reviewer#2:COMPLETED",
-      "planner#1:COMPLETED",
-      "planner#2:COMPLETED",
-    ],
-  );
+  assert.deepEqual(await stepStates(started.runId), [
+    "context-reviewer#1:COMPLETED",
+    "context-reviewer#2:COMPLETED",
+    "planner#1:COMPLETED",
+    "planner#2:COMPLETED",
+  ]);
   const cost = await pool.query(
     "SELECT count(*)::int AS calls, sum(amount_microusd)::int AS micro, count(*) FILTER (WHERE step_id IS NULL)::int AS unattributed FROM model_usage WHERE run_id=$1",
     [started.runId],
   );
-  // 5 scripted calls × (1200 × $4 + 300 × $20) / MTok = 5 × 10 800 micro-USD.
-  assert.deepEqual(cost.rows[0], { calls: 5, micro: 54_000, unattributed: 0 });
+  // 7 scripted calls × (1200 × $4 + 300 × $20) / MTok = 7 × 10 800 micro-USD.
+  assert.deepEqual(cost.rows[0], { calls: 7, micro: 75_600, unattributed: 0 });
+
+  // A step whose activity fails outside the agent loop opens the recovery gate; approving retries it.
+  crashNextReader = true;
+  script.push(sufficientReview(), simplePlan());
+  const crashed = await startRun(await newTask());
+  run = await waitFor(crashed.runId, (p) => p.currentGate?.kind === "RECOVERY", "recovery after crash");
+  assert.equal(run.projection.currentGate.proposal.code, "STEP_FAILED");
+  assert.deepEqual(await stepStates(crashed.runId), ["context-reviewer#1:FAILED"]);
+  await decide(run, "APPROVE");
+  run = await waitFor(crashed.runId, (p) => p.currentGate?.kind === "PLAN_APPROVAL", "plan after retry");
+  await decide(run, "APPROVE");
+  await waitFor(crashed.runId, (p) => p.state === "COMPLETED", "completed after retry");
+  assert.deepEqual(await stepStates(crashed.runId), [
+    "context-reviewer#1:FAILED",
+    "context-reviewer#2:COMPLETED",
+    "planner#1:COMPLETED",
+  ]);
+
+  // Cancelling during a step aborts the hanging model call and releases its reservation.
+  let hanging = false;
+  script.push(
+    (input) =>
+      new Promise((_, reject) => {
+        hanging = true;
+        input.signal.addEventListener("abort", () => reject(new Error("Request was aborted.")));
+      }),
+  );
+  const cancelled = await startRun(await newTask());
+  run = await waitFor(cancelled.runId, (p) => p.state === "CONTEXT_REVIEW" && hanging, "hanging review");
+  await control.requestCancel(randomUUID(), cancelled.runId, {
+    reason: "verification",
+    expectedStateRevision: run.projection.stateRevision,
+  });
+  const cancelAt = Date.now();
+  await waitFor(cancelled.runId, (p) => p.state === "CANCELLED", "cancelled");
+  // The activity learns of the cancellation at its next heartbeat (every 30 s).
+  const stepDeadline = Date.now() + 90_000;
+  while (
+    (await stepStates(cancelled.runId))[0] !== "context-reviewer#1:CANCELLED" &&
+    Date.now() < stepDeadline
+  )
+    await new Promise((r) => setTimeout(r, 500));
+  assert.deepEqual(await stepStates(cancelled.runId), ["context-reviewer#1:CANCELLED"]);
+  const cancelSeconds = Math.round((Date.now() - cancelAt) / 1000);
+  assert.equal(await openReservations(cancelled.runId), 0);
+  assert.equal(script.length, 0, "no call started after the cancellation");
+
+  // The task budget running out between two calls of a step fails that step with its budget code.
+  const budgetTask = await newTask();
+  script.push(async () => {
+    await pool.query(
+      "UPDATE workspace_operations SET policy=jsonb_set(policy,'{taskLimitUsd}','0.01') WHERE workspace_id=$1",
+      [workspaceId],
+    );
+    return reply([{ type: "tool_use", id: "t9", name: "repo_list", input: { dir: null } }], "tool_use");
+  });
+  const starved = await startRun(budgetTask);
+  run = await waitFor(starved.runId, (p) => p.currentGate?.kind === "RECOVERY", "recovery after budget");
+  assert.equal(run.projection.currentGate.proposal.code, "TASK_BUDGET_EXHAUSTED");
+  assert.deepEqual(await stepStates(starved.runId), ["context-reviewer#1:FAILED"]);
+  assert.equal(await openReservations(starved.runId), 0);
+  await pool.query(
+    "UPDATE workspace_operations SET policy=jsonb_set(policy,'{taskLimitUsd}','2') WHERE workspace_id=$1",
+    [workspaceId],
+  );
+  await decide(run, "REJECT", "Stop after the budget ran out.");
+  await waitFor(starved.runId, (p) => p.state === "CANCELLED", "cancelled after budget");
   console.log(
     JSON.stringify({
       status: "passed",
       runId: started.runId,
-      state: run.projection.state,
-      planRevision: run.projection.plan.revision,
+      state: completed.projection.state,
+      planRevision: completed.projection.plan.revision,
+      scenarios: ["gates", "crash-recovery", "cancel-during-step", "budget-during-step"],
+      cancelSeconds,
       calls: cost.rows[0].calls,
       costUsd: cost.rows[0].micro / 1e6,
     }),

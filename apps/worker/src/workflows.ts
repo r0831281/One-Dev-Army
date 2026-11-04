@@ -1,4 +1,5 @@
 import {
+  ActivityFailure,
   allHandlersFinished,
   ApplicationFailure,
   CancellationScope,
@@ -9,6 +10,7 @@ import {
   proxyActivities,
   patched,
   setHandler,
+  TimeoutFailure,
   uuid4,
   workflowInfo,
 } from "@temporalio/workflow";
@@ -21,7 +23,7 @@ import type {
 } from "../../../packages/contracts/src/index.js";
 import type { CancelReceipt, CancelRunInput, TaskRunActivities, TaskRunWorkflowInput } from "./types.js";
 import { routeQaFailure } from "./qa-recovery.js";
-import type { LiveActivities } from "./live-activities.js";
+import type { LiveActivities, LiveStepInput, LiveStepResult } from "./live-activities.js";
 
 export async function TaskRunWorkflowReplayFixture(value: number): Promise<number> {
   if (patched("phase2-compatible-evolution-v2")) return value + 1;
@@ -39,6 +41,11 @@ const live = proxyActivities<LiveActivities>({
   startToCloseTimeout: "20 minutes",
   heartbeatTimeout: "2 minutes",
   retry: { maximumAttempts: 1 },
+});
+// Bookkeeping after a live step that never reported back; no model calls, so retrying is safe.
+const liveCleanup = proxyActivities<Pick<LiveActivities, "abandonStep">>({
+  startToCloseTimeout: "30 seconds",
+  retry: { maximumAttempts: 3, initialInterval: "1 second", maximumInterval: "10 seconds" },
 });
 
 export const submitGateDecision = defineUpdate<DecisionReceipt, [GateDecisionInput]>("submitGateDecision");
@@ -224,6 +231,7 @@ export async function TaskRunWorkflow(input: TaskRunWorkflowInput): Promise<Work
         iteration,
         ...(planRevision === undefined ? {} : { planRevision }),
         ...(input.dataSource ? { dataSource: input.dataSource } : {}),
+        ...(role === "planner" ? { brief: clarification } : {}),
       };
     };
     const openAndWait = async (
@@ -265,12 +273,47 @@ export async function TaskRunWorkflow(input: TaskRunWorkflowInput): Promise<Work
       return Boolean(decision && !projection.cancelRequested && decision.decision === "APPROVE");
     };
 
+    // Runs started before this patch never cancelled a live step, so their replay must not either.
+    const cancellableSteps = patched("live-step-cancellation-v1");
+    /**
+     * Runs one live step. A cancelled run returns null; an activity that crashed, timed out or failed outside the
+     * agent loop becomes an ordinary failed result, so it reaches the recovery gate instead of failing the run.
+     */
+    const runStep = async <T>(
+      step: LiveStepInput,
+      call: (step: LiveStepInput) => Promise<LiveStepResult<T>>,
+    ): Promise<LiveStepResult<T> | null> => {
+      try {
+        if (!cancellableSteps) return await call(step);
+        activeCompletionScope = new CancellationScope();
+        return await activeCompletionScope.run(() => call(step));
+      } catch (error) {
+        if (projection.cancelRequested) return null;
+        if (!(error instanceof ActivityFailure)) throw error;
+        const code = error.cause instanceof TimeoutFailure ? "STEP_TIMED_OUT" : "STEP_FAILED";
+        const detail = (error.cause?.message ?? error.message).slice(0, 500);
+        await liveCleanup.abandonStep({
+          workspaceId: step.workspaceId,
+          runId: step.runId,
+          role: step.role,
+          binding: step.binding,
+          iteration: step.iteration,
+          code,
+          detail,
+        });
+        return { ok: false, code, detail };
+      } finally {
+        activeCompletionScope = null;
+      }
+    };
+
     let reviewIteration = 0;
     for (;;) {
       if (projection.cancelRequested) return finishCancellation();
       advance("CONTEXT_REVIEW");
       await activities.projectRun(projectionInput());
-      const reviewed = await live.analyseContext(stepInput("context-reviewer", ++reviewIteration));
+      const reviewed = await runStep(stepInput("context-reviewer", ++reviewIteration), live.analyseContext);
+      if (!reviewed || (cancellableSteps && projection.cancelRequested)) return finishCancellation();
       if (!reviewed.ok) {
         if (await recover("Context review", reviewed)) continue;
         return finishCancellation();
@@ -307,14 +350,19 @@ export async function TaskRunWorkflow(input: TaskRunWorkflowInput): Promise<Work
       advance("PLANNING");
       await activities.projectRun(projectionInput());
       const planRevision = (projection.plan?.revision ?? 0) + 1;
-      const planned = await live.planTask(stepInput("planner", ++planIteration, planRevision));
+      const planned = await runStep(stepInput("planner", ++planIteration, planRevision), live.planTask);
+      if (!planned || (cancellableSteps && projection.cancelRequested)) return finishCancellation();
       if (!planned.ok) {
         if (await recover("Planning", planned)) continue;
         return finishCancellation();
       }
       advance("AWAITING_PLAN");
       projection = { ...projection, plan: planned.output };
-      const decision = await openAndWait("PLAN_APPROVAL", planRevision, planned.artifactHash, planned.output);
+      // The brief travels with the plan so the gate shows what the plan was built from.
+      const decision = await openAndWait("PLAN_APPROVAL", planRevision, planned.artifactHash, {
+        ...planned.output,
+        ...(clarification?.requirements?.length ? { context: clarification } : {}),
+      });
       if (!decision || projection.cancelRequested) return finishCancellation();
       if (decision.decision === "APPROVE") break;
       const used = projection.budget.humanReplansUsed + 1;

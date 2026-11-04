@@ -17,7 +17,11 @@ import {
   type ConnectorScope,
 } from "../../../packages/connectors/src/policy.js";
 import { TEMPO_ORIGIN, TempoPlanningSource } from "../../../packages/connectors/src/tempo.js";
-import { PgPhase3Repository, canonicalSha256 } from "../../../packages/persistence/src/index.js";
+import {
+  PgPhase3Repository,
+  PgSourceImageStore,
+  canonicalSha256,
+} from "../../../packages/persistence/src/index.js";
 import { DEFAULT_OPERATIONS } from "../../../packages/persistence/src/operations.js";
 import { validateProfile, type AgentProfile } from "../../../packages/prompt-compiler/src/index.js";
 import type { ProfileRegistry } from "../../../packages/agents/src/index.js";
@@ -111,6 +115,41 @@ export function scopedTransport(
       if (!response.ok) throw new Error(`CONNECTOR_HTTP_${response.status}`);
       return (await response.json()) as T;
     },
+    ...(scope.kind === "get"
+      ? {
+          download: async (
+            request: { method: "GET"; url: string },
+            maxBytes: number,
+          ): Promise<Uint8Array> => {
+            assertConnectorRequest(scope, request);
+            const credential = process.env[credentialEnv];
+            if (!credential) throw new Error("CONNECTOR_CREDENTIAL_MISSING");
+            const response = await fetch(request.url, {
+              method: "GET",
+              headers: { accept: "*/*", authorization: credential },
+              redirect: "error",
+              signal: AbortSignal.timeout(30000),
+            });
+            if (!response.ok) throw new Error(`CONNECTOR_HTTP_${response.status}`);
+            if (Number(response.headers.get("content-length") ?? 0) > maxBytes) {
+              await response.body?.cancel();
+              throw new Error("IMAGE_TOO_LARGE");
+            }
+            // Read in chunks so a missing or false Content-Length cannot make us buffer an unbounded body.
+            const chunks: Uint8Array[] = [];
+            let size = 0;
+            for await (const chunk of response.body ?? []) {
+              size += chunk.byteLength;
+              if (size > maxBytes) {
+                await response.body?.cancel().catch(() => {});
+                throw new Error("IMAGE_TOO_LARGE");
+              }
+              chunks.push(chunk);
+            }
+            return Buffer.concat(chunks);
+          },
+        }
+      : {}),
   };
 }
 export class WorkspaceConfiguration {
@@ -119,7 +158,10 @@ export class WorkspaceConfiguration {
     private readonly workspaceId: string,
     private readonly profiles: ProfileRegistry,
     private readonly ingestion: IngestionDependencies,
-  ) {}
+  ) {
+    this.images = new PgSourceImageStore(pool, workspaceId);
+  }
+  private readonly images: PgSourceImageStore;
   async initialize() {
     const tasks = await this.pool.query(
       "SELECT c.context FROM task_contexts c JOIN tasks t ON t.id=c.task_id WHERE t.workspace_id=$1 ORDER BY c.revision",
@@ -199,6 +241,7 @@ export class WorkspaceConfiguration {
         instanceId: c.id,
         repository: { id: c.repositoryId, baseSha },
         fetchedAt: new Date().toISOString(),
+        images: this.images,
       });
       this.ingestion.rules.push({
         id: c.id,

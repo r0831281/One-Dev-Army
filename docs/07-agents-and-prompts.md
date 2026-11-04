@@ -4,8 +4,8 @@
 
 | Role | Input | Structured output | Allowed capabilities |
 | --- | --- | --- | --- |
-| Context reviewer | TaskContext, repository inventory | Sufficiency, questions, proposed assumptions, relevant paths | Read/search repository snapshot |
-| Planner | Reviewed context, constraints, prior feedback | Ordered steps, acceptance mapping, tests, risks, estimates | Read/search; no file writes |
+| Context reviewer | TaskContext with discussion and images, repository inventory, recent commits | Sufficiency, questions, proposed assumptions, relevant paths, requirements (`new`, `partial`, `implemented`, `external`, `unverified`) with sources and evidence, findings, no-action items | Read/search/history of repository snapshot; optional read-only database query |
+| Planner | Context brief from the accepted review, constraints, prior feedback | Ordered steps, acceptance mapping covering every `new`, `partial` and `external` requirement, tests, risks, estimates | Read/search; no file writes |
 | Implementer | Approved plan/hash, base SHA | Candidate patch, change summary | Sandbox read/write/exec within policy |
 | Tester | Candidate patch/hash, runner policy | Exit codes, report artifacts, failures | Deterministic sandbox test commands |
 | Reviewer | Diff, test/static results, constraints | Findings, severity, approval recommendation | Read/search and approved static analyzers |

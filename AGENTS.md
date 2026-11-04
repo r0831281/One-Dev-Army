@@ -106,7 +106,7 @@ Setup does the following:
    accounts `product-database` and `temporal-database`). macOS may show a Keychain prompt; let the human approve it.
 3. It runs `docker compose -f infra/compose.yaml up -d --wait`, which starts Postgres, Temporal, the OTel Collector and
    Prometheus.
-4. It applies **all** migrations in `packages/persistence/migrations` (currently up to `007`, even though the journal
+4. It applies **all** migrations in `packages/persistence/migrations` (currently up to `010`, even though the journal
    label says `migration-head-3`).
 
 The step is idempotent: each operation is journalled. To continue after a failure, use
@@ -242,13 +242,17 @@ curl -fsS -H "$ODA_AUTH" "$ODA_API/configuration"
   - GitHub, Jira and Tempo may only make GET requests to their origin.
   - Odoo may only POST `search_read` on `project.task`: `/json/2/project.task/search_read` for JSON-2, or
     `/jsonrpc` with `common.login` or `object.execute_kw(project.task, search_read)` for JSON-RPC.
+  - Odoo may also `search_read` `mail.message` (the task's chatter), but only when the domain starts with
+    `["model","=","project.task"]` and `["res_id","=",<task id>]`, and `ir.attachment` (the task's images) only
+    when it starts with `["res_model","=","project.task"]` and `["res_id","=",<task id>]`.
+  - Jira image attachments are read with `GET /rest/api/3/attachment/content/<id>?redirect=false`.
   - Anything else is `CONNECTOR_SCOPE_DENIED`.
 - Access each connector needs:
   - **GitHub:** read access to that repository's issues. A fine-grained PAT with **Issues: read-only** is enough.
     Pull-request numbers are rejected.
   - **Jira:** browse access to the project's issues, plus to every issue planned in Tempo, so their summaries can be
     read.
-  - **Odoo:** the API user needs read access to `project.task`.
+  - **Odoo:** the API user needs read access to `project.task`; that also lets it read the task's chatter.
 
 ### Example: Tempo planning, Jira helpdesk, Odoo tasks
 
@@ -418,17 +422,62 @@ other four roles (implementer, tester, reviewer, reporter) still run the determi
 implementation needs a real sandbox, which is not built yet.
 
 **Starting a run.** Click **Analyse with agents** on a task, or call `POST /api/v1/tasks/<taskId>/analyse` with an
-optional `idempotency-key` header. The API builds the v3 manifest itself. Then:
+optional `idempotency-key` header. Like every idempotency key, it must be a UUID (`IDEMPOTENCY_KEY_INVALID`
+otherwise). The API builds the v3 manifest itself. Then:
 
-1. **Context review.** The context reviewer reads the task and, read-only, the repository that claims the task's key
-   prefix. If it has questions, a **clarification gate** opens:
+1. **Context review.** This is the quality gate before planning. The context reviewer works in three phases:
+   - **Gather:** it reads the description, every discussion message (labelled `M1`, `M2`, …) and every image, and
+     then, read-only, the code and the database copy.
+   - **Analyse:** it lists the requirements (`R1`, `R2`, …), including changes asked for in later comments. Each
+     requirement cites its sources. It compares each requirement with the current code and marks it `new`,
+     `partial` or `implemented`, citing the files, or `external` when it concerns configuration, data, deployment or
+     files outside the repository. It compares dates: the task text includes the 15 most recent commits at the pinned
+     commit, and `repo_history` lists the commits touching one path, so a fix made after the message that asked for
+     it is marked `implemented` instead of being planned again. Without a repository, every requirement is
+     `unverified` or `external`.
+   - **Decide:** it judges the context sufficient only when it has no questions left.
+
+   `acceptClarification` enforces this. It rejects the review, so the model gets a repair turn, when any of the
+   following holds. All problems are reported in one rejection, so a single repair turn can fix them:
+   - a message, image or the description is neither a requirement's source nor listed as asking for nothing (the
+     title may be cited too, but need not be);
+   - a requirement is left unchecked although the repository is available;
+   - an `implemented` or `partial` requirement cites no existing file, or the reviewer did not look at the code of
+     any of its cited files (or folders) in that review: a `repo_read` of it, or a `repo_search` hit in it;
+   - the review says sufficient but still asks questions.
+
+   The accepted review is handed to the planner as a `CONTEXT BRIEF`, assumptions included. The planner plans only
+   `new`, `partial` and `external` requirements (an `external` one as operational steps: where, what to set or
+   install, how to check it), and `acceptPlan` rejects a plan whose `acceptanceMapping` does not name each one. The
+   planner is told to give an `implemented` requirement at most one verification step, but that is not enforced.
+   The plan gate shows the brief.
+   If the reviewer has questions, a **clarification gate** opens:
    - **Send answers:** the review runs again with your answers.
    - **Accept assumptions:** the proposed assumptions are adopted and the run moves on to planning.
+
 2. **Planning.** The planner writes a plan and a **plan gate** opens:
    - **Request changes:** you get a new plan revision.
    - **Approve:** the run ends `COMPLETED` with the approved plan stored.
-3. **Failures.** A refusal, invalid output after the repair turns, a hit call limit or an exhausted budget opens a
-   **recovery gate**. Retry runs the failed step again; cancel ends the run.
+3. **Failures.** These open a **recovery gate**: a refusal (`AGENT_REFUSED`), invalid output after the repair turns
+   (`AGENT_OUTPUT_INVALID`), the call limit (`AGENT_CALL_LIMIT`), the input limit (`AGENT_INPUT_LIMIT`), the step
+   running out of time (`AGENT_TIME_LIMIT`), an exhausted budget (`TASK_BUDGET_EXHAUSTED`, `DAILY_BUDGET_EXHAUSTED`),
+   and a step whose activity crashed or timed out (`STEP_FAILED`, `STEP_TIMED_OUT`; the step is then marked failed
+   and its reservations released). Retry runs the failed step again; cancel ends the run.
+
+   **Repair turns.** When an answer fails validation, the reason is sent back to the model and recorded in the
+   step's `projection.detail.repairs` (`agent_steps`), with a shortened copy of the rejected answer (`answer`, strings
+   cut to 200 characters), so you can see which check needed the extra calls. A contract rejection names the failing
+   field and rule. Cited sources are normalised before any check: lists and ranges such as `image 4, image 5`,
+   `images 1-3` or `M5-M6, M11` count as the individual parts, and case and plurals do not matter.
+
+   **Plan checks.** Step ids must be unique and look like `S1`, `S2`, …; `acceptanceMapping` may only name existing
+   steps, and every `new`, `partial` or `external` requirement must map to at least one. Entries may read
+   `R1 → S1, S2: how it is checked` or `R1 (label): S1 en S2`; ids in a parenthesised label or in the explanation
+   are ignored.
+
+   **Cancelling** a run while a step is running aborts the model call in flight. The step learns of it at its next
+   heartbeat (about 30 s in the verifier), is marked `CANCELLED` and releases its reservations; no further call starts. Runs
+   started before this change keep the old behaviour (patch `live-step-cancellation-v1`).
 
 **Work environments.** Environments are discovered by convention; nothing needs registering:
 
@@ -443,8 +492,12 @@ optional `idempotency-key` header. The API builds the v3 manifest itself. Then:
   customer, its Jira title or an explicit key-prefix mapping (**Settings → Repositories**, now only an override).
   Customer names must match as whole words, so "Parkside" never matches `ark`. You can change the environment, the
   branch (default: the local `staging` branch) and the database copy.
-- **Repository access.** Agents read the chosen branch through `git show`, `git grep` and `git ls-tree`, at the
-  commit pinned when the run starts. The working tree is never touched. Without an environment, the run uses the
+- **Repository access.** Agents read the chosen branch through `git show`, `git grep`, `git ls-tree` and `git log`
+  (tools `repo_read`, `repo_search`, `repo_list` and `repo_history`, in `packages/sandboxes/src/repo-read.ts`), at the
+  commit pinned when the run starts. `repo_history` returns at most 50 commits up to the pinned commit. Git
+  submodules are read too, from their own repository at the commit the parent pins (`repo_history` on a submodule
+  path lists that submodule's commits). A submodule that is not checked out or lacks that commit is listed as
+  `[SUBMODULE NOT AVAILABLE]`, and reading inside it fails with `REPO_SUBMODULE_UNAVAILABLE`. The working tree is never touched. Without an environment, the run uses the
   task text only.
 - **Data access.** Off by default; tick **Let agents query this database** to turn it on for one run. The agents then
   get `db_query` (`packages/sandboxes/src/db-read.ts`):
@@ -462,17 +515,50 @@ optional `idempotency-key` header. The API builds the v3 manifest itself. Then:
 `~/Library/Application Support/O-D-A/run-worker.sh`. The API never holds the key; it learns only the variable name
 through `ODA_WORKER_CREDENTIALS`, set by `run-api.sh`.
 
-**Data egress.** Task text, your answers and the repository excerpts the agent reads are sent to Anthropic. Nothing
-else is sent.
+**Data egress.** Task text, the task's discussion and images, your answers, the repository excerpts and commit history
+the agent reads, and `db_query` results (when enabled) are sent to Anthropic. Nothing else is sent. The discussion is the newest Jira comments (Jira Service Management internal
+comments included) or Odoo chatter messages, emails and logged notes (tracking messages excluded): at most 50
+messages, 4,000 characters each and 40,000 in all, stored in `extensions["community.source.discussion"]`. If the
+source refuses the comment read (401, 403, 404 or an Odoo RPC error), the task is still stored and the agents are told
+the comments are missing. Timeouts and 5xx errors fail that task's refresh, so the last good context is kept. The
+first sync after this change gives every existing task one new context revision.
 
-**Cost.** Every call reserves its worst-case cost against **Settings → Spending** before it runs, then records the
-real tokens and USD per step. `unpricedPolicy: "block"` refuses models without a price entry
+**Images.** Task images are sent to Anthropic too, as image blocks after the task text, numbered in an `IMAGES`
+section that also says which chatter message each one was attached to:
+
+- **Odoo:** images in the description (`/web/image/<id>` links and inline `data:` images) first, then images attached
+  to chatter messages (newest first), then other image attachments of the task. Only attachments linked to the task
+  (`res_model=project.task`, `res_id=<task>`) are read. A description image that is not linked to the task is listed
+  as not included.
+- **Jira:** image attachments, those shown in the description first.
+- **Limits:** PNG, JPEG, GIF and WebP only, checked by their bytes; at most 8 images, 3.75 MB each and 12 MB in all.
+  Anything left out is listed with its reason, including PDFs and other files, which are not sent.
+- **Storage:** the bytes go into the `source_images` table (migration `010`), keyed by attachment id plus checksum, so
+  a sync downloads each image only once. The worker loads them by sha256 from the same table. Apply the migration on
+  an existing install before restarting the API:
+
+  ```bash
+  node --input-type=module -e '
+  import pg from "pg";
+  import { runMigrations } from "./dist/packages/persistence/src/index.js";
+  const pool = new pg.Pool({ connectionString: process.env.ODA_PRODUCT_DATABASE_URL });
+  await runMigrations(pool, "packages/persistence/migrations");
+  await pool.end();
+  '
+  ```
+
+**Cost.** Before each call the worker counts its exact input tokens (the free token-count endpoint). Over the
+profile's `maxInputTokens`, the oldest tool results are replaced by a short note until it fits; if it still does not
+fit, the step fails with `AGENT_INPUT_LIMIT`. The call then reserves its worst case (the counted input plus
+`maxOutputTokens`) against **Settings → Spending** and records the real tokens and USD afterwards. A step stops
+starting calls 60 s before its 20-minute activity limit, and each call's timeout is cut to the time left. `unpricedPolicy: "block"` refuses models without a price entry
 (`packages/providers/src/anthropic.ts`).
 
 **Other providers.** Profiles for other providers can be saved, but they still hold runs with `EXECUTION_BACKEND`.
 
-**Test without spending.** `node tools/verify-live-analysis.mjs` drives a v3 run through real Temporal and Postgres
-with a scripted model. It needs `ODA_PRODUCT_DATABASE_URL`.
+**Test without spending.** `node tools/verify-live-analysis.mjs` drives v3 runs through real Temporal and Postgres
+with a scripted model: the gate path, a crashed step reaching the recovery gate, cancelling during a step, and the
+task budget running out during a step. It takes under a minute and needs `ODA_PRODUCT_DATABASE_URL`.
 
 ### Profile shape
 

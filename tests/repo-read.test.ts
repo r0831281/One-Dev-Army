@@ -125,7 +125,20 @@ test("repository reader serves the pinned commit, not later commits or the worki
     await assert.rejects(reader.list("missing"), /^Error: REPO_NOT_FOUND$/);
     await assert.rejects(reader.list("large.txt"), /^Error: REPO_NOT_FOUND$/);
 
+    const history = (await reader.history()).content;
+    assert.match(
+      history,
+      /^[0-9a-f]{7,} \d{4}-\d{2}-\d{2}T[^ ]+ ODA Test: one$/,
+      "only commits up to the pinned one",
+    );
+    await assert.rejects(reader.history("../etc"), /REPO_PATH_DENIED/);
+
     const later = await createRepoReader({ root, baseSha: second });
+    assert.deepEqual(
+      (await later.history()).content.split("\n").map((line) => line.split(": ").at(-1)),
+      ["two", "one"],
+    );
+    assert.equal((await later.history("added_later.py")).content.split("\n").length, 1);
     assert.match((await later.read("addons/sale_ext/models/sale.py")).content, /commit-two/);
     assert.match((await later.read("added_later.py")).content, /later/);
   } finally {
@@ -223,5 +236,82 @@ test("repository reader rejects malformed, unknown and non-commit SHAs", async (
     );
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("repository reader reads submodules at the commit the parent pins", async () => {
+  await mkdir(join(process.cwd(), ".test-tmp"), { recursive: true });
+  const base = await realpath(await mkdtemp(join(process.cwd(), ".test-tmp", "oda-repo-sub-")));
+  try {
+    const library = join(base, "library");
+    await mkdir(join(library, "models"), { recursive: true });
+    await git(library, "init", "-q", "-b", "main");
+    await writeFile(join(library, "models", "rule.py"), "def sort_key(value):\n    return 'pinned'\n");
+    await git(library, "add", "-A");
+    await git(library, "commit", "-q", "-m", "library one");
+    const other = join(base, "other");
+    await mkdir(other, { recursive: true });
+    await git(other, "init", "-q", "-b", "main");
+    await writeFile(join(other, "x.py"), "x = 1\n");
+    await git(other, "add", "-A");
+    await git(other, "commit", "-q", "-m", "other one");
+
+    const root = join(base, "parent");
+    await mkdir(join(root, "addons"), { recursive: true });
+    await git(root, "init", "-q", "-b", "main");
+    await writeFile(join(root, "addons", "main.py"), "from library import sort_key\n");
+    await git(root, "-c", "protocol.file.allow=always", "submodule", "add", "-q", library, "vendor/library");
+    await git(root, "-c", "protocol.file.allow=always", "submodule", "add", "-q", other, "vendor/other");
+    await git(root, "add", "-A");
+    await git(root, "commit", "-q", "-m", "parent one");
+    const pinned = await git(root, "rev-parse", "HEAD");
+    // A later commit inside the checked-out submodule must stay invisible: the parent pins the earlier one.
+    const checkout = join(root, "vendor", "library");
+    await writeFile(join(checkout, "models", "rule.py"), "def sort_key(value):\n    return 'later'\n");
+    await git(checkout, "commit", "-q", "-am", "library two");
+    // An uninitialised submodule has an empty folder and no repository.
+    await git(root, "submodule", "deinit", "-q", "-f", "vendor/other");
+
+    const reader = await createRepoReader({ root, baseSha: pinned });
+    assert.match((await reader.read("vendor/library/models/rule.py")).content, /pinned/);
+    assert.equal(
+      (await reader.read("vendor/library/models/rule.py", 2, 2)).content,
+      "2\t    return 'pinned'",
+    );
+    await assert.rejects(reader.read("vendor/library"), /^Error: REPO_NOT_FOUND$/);
+    await assert.rejects(reader.read("vendor/other/x.py"), /^Error: REPO_SUBMODULE_UNAVAILABLE$/);
+    await assert.rejects(reader.read("vendor/library/../../addons/main.py"), /^Error: REPO_PATH_DENIED$/);
+
+    const listing = (await reader.list()).content.split("\n");
+    assert.ok(listing.includes("addons/main.py"));
+    assert.ok(listing.includes("vendor/library/models/rule.py"));
+    assert.ok(listing.includes("vendor/other/ [SUBMODULE NOT AVAILABLE]"));
+    assert.deepEqual((await reader.list("vendor/library/models")).content.split("\n"), [
+      "vendor/library/models/rule.py",
+    ]);
+    assert.ok(await reader.list("vendor/library"), "a submodule counts as a folder");
+
+    assert.equal(
+      (await reader.search("return '")).content,
+      "vendor/library/models/rule.py:2:     return 'pinned'",
+    );
+    assert.match(
+      (await reader.search("sort_key", "*.py")).content,
+      /^addons\/main\.py:1: .*\nvendor\/library\/models\/rule\.py:1: /,
+    );
+    assert.equal(
+      (await reader.search("sort_key", "vendor/library/models/*")).content,
+      "vendor/library/models/rule.py:1: def sort_key(value):",
+    );
+    assert.equal((await reader.search("sort_key", "vendor/**")).content.split("\n").length, 1);
+    assert.equal((await reader.search("return", "addons/*")).content, "[NO MATCHES]");
+
+    assert.deepEqual(
+      (await reader.history("vendor/library")).content.split("\n").map((line) => line.split(": ").at(-1)),
+      ["library one"],
+      "the submodule's own commits up to the pinned one",
+    );
+  } finally {
+    await rm(base, { recursive: true, force: true });
   }
 });

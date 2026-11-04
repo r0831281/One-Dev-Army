@@ -1,7 +1,7 @@
 {
   "schemaVersion": "1.0",
   "release": "0.4.0-phase.4",
-  "generatedAt": "2026-10-29T16:44:44.637Z",
+  "generatedAt": "2026-10-30T10:39:18.850Z",
   "localOnly": true,
   "publication": false,
   "migrationHead": 7,
@@ -77,8 +77,8 @@
     },
     {
       "path": "apps/dashboard/dashboard.js",
-      "sha256": "7c2660522ba8b46466ca24680d8d08f15fe481ac69ffa7dab142d2197ba5a234",
-      "size": 73292
+      "sha256": "8098ecb2729d16762a9b97c0a0cab493253f4fca83c49a06358ad13593acfe94",
+      "size": 75158
     },
     {
       "path": "apps/dashboard/core.js",
@@ -142,7 +142,7 @@
     },
     {
       "path": "artifacts/phase-4/sbom.cdx.json",
-      "sha256": "0fb6713bf0c9fbeda7e85279f7700f19df28e7483f3f7447cdecc58174b9e61b",
+      "sha256": "9bf390883fbc262ab25dd5d3bbf67f0f8847175aa99ada0e251aee907643af47",
       "size": 80970
     }
   ]
