@@ -103,7 +103,7 @@ const ROLE_GUIDANCE: Record<LiveRole, { practices: string[]; style: string[]; to
     practices: [
       "You are the quality gate before planning. Work in three phases and finish each before the next. The planner trusts your result and does not investigate scope again.",
       "Phase 1, gather. Read the whole task: the description, every discussion message (M1, M2, …) and every image. Tasks are Odoo customer work and the repository holds the customer's addons. Find the modules, models, views, reports and translations the task touches and read them at the pinned commit. When a database copy is available, query it for the facts the task depends on.",
-      "Phase 2, analyse. Turn everything that is asked into requirements, one concrete change each (R1, R2, …), and cite where each comes from: description, M3, image 2. Later messages add to or correct earlier ones. A change the requester or a colleague asks for in a comment is in scope unless a message says otherwise; include it. When a later message supersedes an earlier request, keep only the latest version. List a message or image that asks for nothing under noAction with the reason (a timer, a deadline change, a thank-you).",
+      "Phase 2, analyse. Turn everything that is asked into requirements, one concrete change each (R1, R2, …), and cite where each comes from: title, description, M3, image 2. A request to test or verify something is a requirement too (status new: a check to plan). Later messages add to or correct earlier ones. A change the requester or a colleague asks for in a comment is in scope unless a message says otherwise; include it. When a later message supersedes an earlier request, keep only the latest version. List a message or image that asks for nothing under noAction with the reason (a timer, a deadline change, a thank-you, a duplicate screenshot). A screenshot that shows the current or the wanted behaviour of a requirement is a source of that requirement, not noAction. Cite every source on its own (image 1, image 2), not as a range.",
       "For every requirement, compare the request with the current code and set its status: new (nothing there yet), partial (some of it exists; say what is missing), implemented (the code already does it; cite the files and lines), or external (it concerns configuration, data, deployment or files outside the repository, such as system parameters, a module delivered from elsewhere or a production setting; say what you searched and what has to happen outside the code). Read the code before you decide; never guess. Put the evidence in evidence and the files in paths. Record what you established about the current behaviour under findings, so nobody has to look it up again.",
       "Compare dates. Messages and screenshots show the state when they were posted. When the code already does what a message asks, check with repo_history when that code changed: if the change is newer than the message, the requirement is implemented (it may still need deploying or checking on the database; say so in evidence). Mark it partial only when you can name what in the code is still missing or wrong.",
       "Phase 3, decide. The context is sufficient when every new, partial or external requirement has a clear target (file, model, view, report, setting or environment) and a checkable outcome. Never ask something the repository, the database, the images or Odoo's standard behaviour can answer. Ask only what the requester alone can decide and only when the answer changes the implementation, at most five questions, most important first. Everything else becomes a proposedAssumption with the concrete default an experienced Odoo developer would pick (for example a sensible number of decimals, keep the existing printer and label stock).",
@@ -115,6 +115,7 @@ const ROLE_GUIDANCE: Record<LiveRole, { practices: string[]; style: string[]; to
     ],
     tools: [
       "Use repo_list and repo_search to find relevant addons, then repo_read the specific files. Search for the labels, fields and texts that appear in the task and its images.",
+      "Before you mark a requirement implemented or partial, read the code that shows it with repo_read and cite that file; a commit message or a search hit alone is not evidence.",
       "Submodule folders are readable like any other folder, at the commit the repository pins; repo_history on a submodule path lists that submodule's own commits. Only a submodule listed as not available cannot be read.",
     ],
   },
@@ -195,7 +196,12 @@ export function createLiveActivities(pool: Pool, deps: LiveDependencies): LiveAc
 
   async function step<T>(
     input: LiveStepInput,
-    accept: (value: unknown, reader: RepoReader | null, sources: string[]) => Promise<T>,
+    accept: (
+      value: unknown,
+      reader: RepoReader | null,
+      sources: string[],
+      inspected: ReadonlySet<string>,
+    ) => Promise<T>,
     outputSchema: Record<string, unknown>,
     extraTask: string[],
   ): Promise<LiveStepResult<T>> {
@@ -216,7 +222,7 @@ export function createLiveActivities(pool: Pool, deps: LiveDependencies): LiveAc
     const stepId = stepIdFor(input.runId, input.role, input.iteration);
     let revision = 0;
     // Why answers failed validation, so repair turns can be explained and the checks tuned.
-    const repairs: Array<{ call: number; reason: string }> = [];
+    const repairs: Array<{ call: number; reason: string; answer: string }> = [];
     const project = (
       state: "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED",
       detail: Record<string, unknown>,
@@ -284,6 +290,8 @@ export function createLiveActivities(pool: Pool, deps: LiveDependencies): LiveAc
       taskContent: task,
     });
 
+    // Files the agent reads; the context gate checks implemented work against them.
+    const inspected = new Set<string>();
     let spent = 0;
     // Reservations of calls that have not produced usage yet; released if the step fails.
     const openReservations = new Set<string>();
@@ -315,7 +323,8 @@ export function createLiveActivities(pool: Pool, deps: LiveDependencies): LiveAc
         reader,
         db,
         outputSchema,
-        accept: (value) => accept(value, reader, contextSources(input.context, sent)),
+        inspected,
+        accept: (value) => accept(value, reader, contextSources(input.context, sent), inspected),
         modelTurn: deps.modelTurn,
         ...(deps.countTokens ? { countTokens: deps.countTokens } : {}),
         hooks: {
@@ -367,8 +376,8 @@ export function createLiveActivities(pool: Pool, deps: LiveDependencies): LiveAc
           heartbeat(detail) {
             activity.heartbeat({ stepId, ...detail });
           },
-          async onRepair(call, reason) {
-            repairs.push({ call, reason: reason.slice(0, 1_000) });
+          async onRepair(call, reason, answer) {
+            repairs.push({ call, reason: reason.slice(0, 1_000), answer });
           },
         },
       });
@@ -438,7 +447,7 @@ export function createLiveActivities(pool: Pool, deps: LiveDependencies): LiveAc
     analyseContext: (input) =>
       step(
         input,
-        (value, reader, sources) => acceptClarification(value, reader, sources),
+        (value, reader, sources, inspected) => acceptClarification(value, reader, sources, inspected),
         CLARIFICATION_OUTPUT_SCHEMA,
         [],
       ),

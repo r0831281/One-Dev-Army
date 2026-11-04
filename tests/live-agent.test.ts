@@ -16,7 +16,10 @@ import {
   CLARIFICATION_OUTPUT_SCHEMA,
   acceptClarification,
   acceptPlan,
+  answerExcerpt,
   contextSources,
+  validationReason,
+  expandSource,
   renderBrief,
   runAgent,
   type RepoReader,
@@ -550,7 +553,11 @@ test("plan step ids are unique and the mapping names only existing steps", () =>
   } as never;
   const mapped = (acceptanceMapping: string[]) =>
     acceptPlan({ title: "P", steps: ["S1", "S2"].map(step), acceptanceMapping, risks: [] }, 1, [], brief);
-  assert.throws(() => mapped(["R1 → S1, S2", "R2 → S2"]), /R1 is already implemented/);
+  // Verifying implemented work may take several steps (a plan can be verification only).
+  assert.doesNotThrow(() => mapped(["R1 → S1, S2", "R2 → S2"]));
+  // Without an arrow: "R2 (label): S1 en S2", with ":" inside the label too.
+  assert.doesNotThrow(() => mapped(["R2 (format: 102x152, gelijk aan S9): S1 en S2"]));
+  assert.throws(() => mapped(["R2 (label): S7"]), /do not exist: S7/);
   assert.throws(() => mapped(["R2: nothing to do"]), /missing R2/, "a requirement needs at least one step");
   assert.doesNotThrow(() => mapped(["R1 → S1: check on staging", "R2 → S2"]));
   // Ids in the explanation are not part of the mapping.
@@ -661,4 +668,182 @@ test("the input limit trims old tool results, then fails before an oversized cal
     accept: async (v) => v,
   });
   assert.equal(fallback.inputs.length, 1, "a failing counter falls back to the estimate");
+});
+
+test("cited sources are normalised: ranges, plurals and case", () => {
+  assert.deepEqual(expandSource("images 1-3"), ["image 1", "image 2", "image 3"]);
+  assert.deepEqual(expandSource("Image 2"), ["image 2"]);
+  assert.deepEqual(expandSource("image 4–image 5"), ["image 4", "image 5"]);
+  assert.deepEqual(expandSource("M2-M4"), ["M2", "M3", "M4"]);
+  assert.deepEqual(expandSource("m7"), ["M7"]);
+  assert.deepEqual(expandSource("Description"), ["description"]);
+  assert.deepEqual(expandSource("images 5-2"), ["images 5-2"], "a reversed range stays as written");
+  assert.deepEqual(expandSource("the invoice"), ["the invoice"]);
+  assert.deepEqual(expandSource("image 4, image 5, image 6"), ["image 4", "image 5", "image 6"]);
+  assert.deepEqual(expandSource("M5-M6, M11"), ["M5", "M6", "M11"]);
+  assert.deepEqual(expandSource("M2 en M3"), ["M2", "M3"]);
+  assert.deepEqual(expandSource("M6 (vertalingen, Recupel-lettertype)"), ["M6"]);
+});
+
+test("the context gate accepts a source range and splits ranged noAction entries", async () => {
+  const sources = ["description", "M1", "image 1", "image 2", "image 3"];
+  const clarification = await acceptClarification(
+    {
+      requirements: [
+        {
+          id: "R1",
+          text: "Sort the values",
+          sources: ["Description", "images 1-2"],
+          status: "new",
+          evidence: "Nothing sorts them yet.",
+          paths: [],
+        },
+      ],
+      noAction: [
+        { source: "M1-M1", reason: "Thanks" },
+        // A list longer than a source's 40-character limit is split before the contract check.
+        { source: "Image 3, image 3, image 3, image 3, image 3", reason: "Duplicate" },
+      ],
+      findings: [],
+      sufficient: true,
+      questions: [],
+      proposedAssumptions: [],
+      relevantPaths: [],
+    },
+    reader,
+    sources,
+  );
+  assert.deepEqual(clarification.requirements![0]!.sources, ["description", "image 1", "image 2"]);
+  assert.deepEqual(
+    clarification.noAction!.map((n) => n.source),
+    ["M1", "image 3"],
+  );
+});
+
+test("repair records keep a shortened copy of the rejected answer", () => {
+  const excerpt = answerExcerpt({ acceptanceMapping: ["R4 – S2"], description: "x".repeat(500) });
+  assert.match(excerpt, /"R4 – S2"/);
+  assert.ok(excerpt.length < 300, "long strings are cut");
+  assert.equal(answerExcerpt("not json"), "not json");
+});
+
+test("implemented or partial work must cite a file the reviewer read", async () => {
+  const review = (status: string, paths: string[]) => ({
+    requirements: [{ id: "R1", text: "Sort", sources: ["description"], status, evidence: "e", paths }],
+    noAction: [],
+    findings: [],
+    sufficient: true,
+    questions: [],
+    proposedAssumptions: [],
+    relevantPaths: [],
+  });
+  const sale = "addons/sale_custom/models/sale.py";
+  await assert.rejects(
+    acceptClarification(review("implemented", [sale]), reader, ["description"], new Set()),
+    /R1 is implemented, but you did not look at the code of any of its paths/,
+  );
+  assert.ok(
+    await acceptClarification(review("implemented", [sale]), reader, ["description"], new Set([sale])),
+  );
+  assert.ok(
+    await acceptClarification(
+      review("partial", ["addons/sale_custom/"]),
+      reader,
+      ["description"],
+      new Set([sale]),
+    ),
+    "a cited folder counts when a file inside it was read",
+  );
+  assert.ok(await acceptClarification(review("new", []), reader, ["description"], new Set()));
+
+  // The loop records what repo_read was asked for.
+  const inspected = new Set<string>();
+  const { turn } = scripted([
+    message(
+      [
+        {
+          type: "tool_use",
+          id: "r",
+          name: "repo_read",
+          input: { path: sale, startLine: null, endLine: null },
+        },
+      ],
+      "tool_use",
+    ),
+    message([{ type: "text", text: "{}" }], "end_turn"),
+  ]);
+  await runAgent({ ...base, inspected, modelTurn: turn, accept: async (v) => v });
+  assert.deepEqual([...inspected], [sale]);
+
+  // Files in search hits count too.
+  const searched = new Set<string>();
+  const search = scripted([
+    message(
+      [{ type: "tool_use", id: "q", name: "repo_search", input: { pattern: "SaleOrder", pathGlob: null } }],
+      "tool_use",
+    ),
+    message([{ type: "text", text: "{}" }], "end_turn"),
+  ]);
+  await runAgent({ ...base, inspected: searched, modelTurn: search.turn, accept: async (v) => v });
+  assert.deepEqual([...searched], [sale]);
+  assert.match(
+    JSON.stringify(search.inputs.at(-1)?.messages.at(-1)?.content),
+    /SaleOrder/,
+    "the search result reached the model",
+  );
+});
+
+test("a contract rejection tells the model which field broke which rule", () => {
+  const reason = validationReason(
+    Object.assign(new Error("Contract validation failed"), {
+      errors: [{ instancePath: "/noAction/1/source", message: "must NOT have more than 40 characters" }],
+    }),
+  );
+  assert.equal(
+    reason,
+    "Contract validation failed; /noAction/1/source must NOT have more than 40 characters",
+  );
+  assert.equal(validationReason(new Error("Plain")), "Plain");
+});
+
+test("the context gate reports every problem at once and accepts the title as a source", async () => {
+  const review = {
+    requirements: [
+      {
+        id: "R1",
+        text: "Sharper logo",
+        sources: ["Title 'Logo te klein'", "M1"],
+        status: "new",
+        evidence: "e",
+        paths: [],
+      },
+      { id: "R2", text: "Check PDFs", sources: ["M2"], status: "unverified", evidence: "e", paths: [] },
+    ],
+    noAction: [],
+    findings: [],
+    sufficient: true,
+    questions: ["Which report?"],
+    proposedAssumptions: [],
+    relevantPaths: [],
+  };
+  const sources = ["M1", "M2", "M3"];
+  await assert.rejects(acceptClarification(review, reader, sources, new Set()), (error: Error) => {
+    assert.match(error.message, /^\(1\) Not accounted for: M3/);
+    assert.match(error.message, /\(2\) R2 is unverified.*A request to test or verify something is new/);
+    assert.match(error.message, /\(3\) When sufficient is true, ask no questions/);
+    assert.doesNotMatch(error.message, /Unknown sources/, "the title is a known source");
+    return true;
+  });
+  const fixed = await acceptClarification(
+    {
+      ...review,
+      requirements: [review.requirements[0], { ...review.requirements[1], status: "new" }],
+      noAction: [{ source: "M3", reason: "Thanks" }],
+      questions: [],
+    },
+    reader,
+    sources,
+    new Set(),
+  );
+  assert.deepEqual(fixed.requirements![0]!.sources, ["title", "M1"]);
 });

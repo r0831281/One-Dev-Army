@@ -49,8 +49,11 @@ export interface AgentHooks {
   beforeCall(callIndex: number, inputTokens: number): Promise<void>;
   /** Records the real usage of a finished call. */
   afterCall(callIndex: number, message: Anthropic.Messages.Message): Promise<void>;
-  /** Called when an answer fails validation, with the reason sent back to the model (or the final rejection). */
-  onRepair?(callIndex: number, reason: string): Promise<void>;
+  /**
+   * Called when an answer fails validation, with the reason sent back to the model (or the final rejection) and a
+   * shortened copy of the rejected answer, so the failing check can be diagnosed.
+   */
+  onRepair?(callIndex: number, reason: string, answer: string): Promise<void>;
   heartbeat(detail: Record<string, unknown>): void;
 }
 
@@ -79,6 +82,8 @@ export interface AgentRunInput<T> {
   /** Parses the model's JSON into the contract type; throws with a message the model can act on. */
   accept(value: unknown): Promise<T>;
   modelTurn: ModelTurn;
+  /** Filled with the repository paths the agent saw code of: files it read and files in its search hits. */
+  inspected?: Set<string>;
   /** Exact input count; without it the loop uses a conservative estimate (tests and offline verifiers). */
   countTokens?: CountTokens;
   hooks: AgentHooks;
@@ -328,11 +333,14 @@ export async function runAgent<T>(input: AgentRunInput<T>): Promise<{ output: T;
       const results: Anthropic.ToolResultBlockParam[] = [];
       for (const block of toolUses) {
         try {
-          results.push({
-            type: "tool_result",
-            tool_use_id: block.id,
-            content: await runTool(input.reader, input.db ?? null, block),
-          });
+          const content = await runTool(input.reader, input.db ?? null, block);
+          results.push({ type: "tool_result", tool_use_id: block.id, content });
+          const read = block.input as { path?: unknown };
+          if (block.name === "repo_read" && typeof read.path === "string")
+            input.inspected?.add(normalizePath(read.path));
+          // A search hit shows the matching code lines, which is evidence of that file too.
+          if (block.name === "repo_search")
+            for (const hit of content.matchAll(/^([^\s:][^:\n]*):\d+:/gmu)) input.inspected?.add(hit[1]!);
         } catch (error) {
           const code = /^[A-Z][A-Z0-9_]{0,80}$/.test((error as Error).message)
             ? (error as Error).message
@@ -345,20 +353,52 @@ export async function runAgent<T>(input: AgentRunInput<T>): Promise<{ output: T;
     }
     const text = finalText(message);
     if (!text) throw new AgentFailure("AGENT_NO_OUTPUT", "The model ended without a final answer.");
+    let parsed: unknown = text;
     try {
-      return { output: await input.accept(JSON.parse(text)), calls: call + 1 };
+      parsed = JSON.parse(text);
+      return { output: await input.accept(parsed), calls: call + 1 };
     } catch (error) {
-      await input.hooks.onRepair?.(call, (error as Error).message.slice(0, 2000));
-      if (repairs >= input.structuredOutputRepairs)
-        throw new AgentFailure("AGENT_OUTPUT_INVALID", (error as Error).message.slice(0, 2000));
+      const reason = validationReason(error);
+      await input.hooks.onRepair?.(call, reason, answerExcerpt(parsed));
+      if (repairs >= input.structuredOutputRepairs) throw new AgentFailure("AGENT_OUTPUT_INVALID", reason);
       repairs++;
       messages.push({
         role: "user",
-        content: `Your answer did not pass validation: ${(error as Error).message.slice(0, 2000)}\nReturn the corrected JSON object only.`,
+        content: `Your answer did not pass validation: ${reason}\nIf you need to check something first, use the tools; then return the corrected JSON object only.`,
       });
     }
   }
   throw new AgentFailure("AGENT_CALL_LIMIT", `maxModelCalls ${input.maxModelCalls} reached`);
+}
+
+/** Why an answer was rejected, with the failing fields of a contract check spelled out (path and rule). */
+export function validationReason(error: unknown): string {
+  const { message, errors } = error as { message?: string; errors?: unknown };
+  const details = Array.isArray(errors)
+    ? errors
+        .slice(0, 5)
+        .map(
+          (e: { instancePath?: string; message?: string }) =>
+            `${e.instancePath || "/"} ${e.message ?? "is invalid"}`,
+        )
+    : [];
+  return [String(message ?? error), ...details].join("; ").slice(0, 2000);
+}
+
+/** A repository path in one spelling: no "./" parts, repeated or trailing slashes. */
+export const normalizePath = (path: string) =>
+  path
+    .split("/")
+    .filter((part) => part !== "" && part !== ".")
+    .join("/");
+
+/** The rejected answer with every string cut to 200 characters, at most 6,000 characters in all. */
+export function answerExcerpt(value: unknown): string {
+  if (typeof value === "string") return value.slice(0, 2_000);
+  const text = JSON.stringify(value, (_key, item: unknown) =>
+    typeof item === "string" && item.length > 200 ? `${item.slice(0, 200)}…` : item,
+  );
+  return text.length > 6_000 ? `${text.slice(0, 6_000)}…` : text;
 }
 
 // Structured-output schemas: the contract shapes without length limits, which the API does not enforce;
@@ -451,12 +491,65 @@ export function contextSources(context: TaskContext, images: SourceImage[]): str
  * The context gate's quality checks: every task part is accounted for, every requirement is checked against the
  * code when there is code to check, cited paths exist at the pinned commit, and the verdict matches the questions.
  */
+/**
+ * Spells out one cited source in the form the context gate checks: "image 2", "M3", "description". Lists ("image 4,
+ * image 5", "M2 en M3") and ranges ("images 1-5", "M2–M4") become each member; case and plural forms are normalised.
+ */
+export function expandSource(source: string): string[] {
+  // A label in parentheses ("M6 (translations)") is not part of the source.
+  source = source.replace(/\([^)]*\)/gu, " ");
+  const parts = source.split(/\s*(?:[,;&]|\band\b|\ben\b)\s*/iu).filter((part) => part.trim() !== "");
+  if (parts.length > 1) return [...new Set(parts.flatMap(expandSource))];
+  const text = source.trim();
+  if (/^description$/iu.test(text)) return ["description"];
+  // "title", "Title 'Logo te klein'": the task title, whatever quote of it follows.
+  if (/^(?:the\s+)?(?:task\s+)?(?:title|titel)\b/iu.test(text)) return ["title"];
+  const range = (from: string, to: string | undefined, label: (n: number) => string) => {
+    const first = Number(from);
+    const last = Number(to ?? from);
+    if (last < first || last - first > 100) return [text];
+    return Array.from({ length: last - first + 1 }, (_, i) => label(first + i));
+  };
+  const image = /^images?\s*(\d+)(?:\s*[-–—]\s*(?:images?\s*)?(\d+))?$/iu.exec(text);
+  if (image) return range(image[1]!, image[2], (n) => `image ${n}`);
+  const message = /^m(\d+)(?:\s*[-–—]\s*m?(\d+))?$/iu.exec(text);
+  if (message) return range(message[1]!, message[2], (n) => `M${n}`);
+  return [text];
+}
+
 export async function acceptClarification(
   value: unknown,
   reader: RepoReader | null,
   sources: string[] | null = null,
+  /** Paths read during the review; when given, implemented or partial work must cite one of them. */
+  inspected: ReadonlySet<string> | null = null,
 ): Promise<Clarification> {
-  const clarification = validateClarification({ schemaVersion: "1.0", ...(value as object) });
+  // Normalise cited sources before the contract check, so a list, a range or a capitalised label is not a reason
+  // for a repair turn (a list can also exceed a source's length limit).
+  const raw = (value ?? {}) as { requirements?: unknown; noAction?: unknown };
+  const expand = (source: unknown) => (typeof source === "string" ? expandSource(source) : [source]);
+  const clarification = validateClarification({
+    schemaVersion: "1.0",
+    ...raw,
+    ...(Array.isArray(raw.requirements)
+      ? {
+          requirements: raw.requirements.map((r: { sources?: unknown }) =>
+            r && Array.isArray(r.sources) ? { ...r, sources: [...new Set(r.sources.flatMap(expand))] } : r,
+          ),
+        }
+      : {}),
+    ...(Array.isArray(raw.noAction)
+      ? {
+          noAction: raw.noAction.flatMap((n: { source?: unknown }) =>
+            n && typeof n.source === "string"
+              ? expandSource(n.source).map((source) => ({ ...n, source }))
+              : [n],
+          ),
+        }
+      : {}),
+  });
+  // Every problem is reported at once, so one repair turn can fix them all.
+  const problems: string[] = [];
   // A cited path may be a file or a directory (an addon, a views folder).
   const exists = async (path: string, field: string) => {
     try {
@@ -468,50 +561,69 @@ export async function acceptClarification(
     try {
       await reader!.list(path.replace(/\/+$/, ""));
     } catch {
-      throw new Error(`${field} contains "${path}", which does not exist at the base commit.`);
+      problems.push(`${field} contains "${path}", which does not exist at the base commit.`);
     }
   };
   if (reader) for (const path of clarification.relevantPaths) await exists(path, "relevantPaths");
   const requirements = clarification.requirements ?? [];
   if (sources) {
-    if (!requirements.length) throw new Error("List the task's requirements; there must be at least one.");
+    if (!requirements.length) problems.push("List the task's requirements; there must be at least one.");
     const ids = requirements.map((r) => r.id);
-    if (new Set(ids).size !== ids.length) throw new Error("Requirement ids must be unique (R1, R2, …).");
-    const known = new Set(sources);
+    if (new Set(ids).size !== ids.length) problems.push("Requirement ids must be unique (R1, R2, …).");
+    // The title may be cited too, but it need not be accounted for: it usually repeats the description.
+    const known = new Set([...sources, "title"]);
     const covered = new Set([
       ...requirements.flatMap((r) => r.sources),
       ...(clarification.noAction ?? []).map((n) => n.source),
     ]);
     const unknown = [...covered].filter((source) => !known.has(source));
     if (unknown.length)
-      throw new Error(`Unknown sources ${unknown.join(", ")}. Use only: ${sources.join(", ")}.`);
+      problems.push(`Unknown sources ${unknown.join(", ")}. Use only: ${[...known].join(", ")}.`);
     const missed = sources.filter((source) => !covered.has(source));
     if (missed.length)
-      throw new Error(
+      problems.push(
         `Not accounted for: ${missed.join(", ")}. Read each one; cite it as a source of a requirement it asks for, or list it under noAction with the reason it asks for nothing.`,
       );
   }
   for (const requirement of requirements) {
     if (reader && requirement.status === "unverified")
-      throw new Error(
-        `${requirement.id} is unverified, but the repository is available. Check the current code and set new, partial or implemented. If it concerns configuration, data, deployment or files outside the repository (system parameters, a module delivered elsewhere, a production setting), set external and say in evidence what you searched and what has to happen outside the code.`,
+      problems.push(
+        `${requirement.id} is unverified, but the repository is available. Check the current code and set new, partial or implemented. A request to test or verify something is new (a check to plan). If it concerns configuration, data, deployment or files outside the repository (system parameters, a module delivered elsewhere, a production setting), set external and say in evidence what you searched and what has to happen outside the code.`,
       );
     if (!reader && requirement.status !== "unverified" && requirement.status !== "external")
-      throw new Error(
+      problems.push(
         `${requirement.id}: without a repository a requirement is unverified, or external when it concerns configuration, data or deployment.`,
       );
     if (
       (requirement.status === "implemented" || requirement.status === "partial") &&
       !requirement.paths.length
     )
-      throw new Error(`${requirement.id} is ${requirement.status}; cite the files that show it in paths.`);
+      problems.push(`${requirement.id} is ${requirement.status}; cite the files that show it in paths.`);
     if (reader) for (const path of requirement.paths) await exists(path, `${requirement.id}.paths`);
+    // A file named in the commit list is not proof: the reviewer must have looked at the code it cites.
+    if (
+      reader &&
+      inspected &&
+      (requirement.status === "implemented" || requirement.status === "partial") &&
+      requirement.paths.length &&
+      !requirement.paths.some((cited) => {
+        const path = normalizePath(cited);
+        return [...inspected].some((read) => read === path || read.startsWith(`${path}/`));
+      })
+    )
+      problems.push(
+        `${requirement.id} is ${requirement.status}, but you did not look at the code of any of its paths in this review. Read the code that shows it (repo_read, or a repo_search whose hits are in that file) before you mark it ${requirement.status}, and cite that file.`,
+      );
   }
   if (!clarification.sufficient && clarification.questions.length === 0)
-    throw new Error("When sufficient is false, ask at least one question.");
+    problems.push("When sufficient is false, ask at least one question.");
   if (clarification.sufficient && clarification.questions.length)
-    throw new Error(
+    problems.push(
       "When sufficient is true, ask no questions; turn them into proposedAssumptions or set sufficient to false.",
+    );
+  if (problems.length)
+    throw new Error(
+      problems.length === 1 ? problems[0] : problems.map((problem, i) => `(${i + 1}) ${problem}`).join("\n"),
     );
   return clarification;
 }
@@ -540,8 +652,7 @@ export function renderBrief(brief: Clarification | null): string {
 
 /**
  * Validates a plan. Step ids must be unique (S1, S2, …) and the acceptance mapping may only name existing steps.
- * With a brief, every open requirement (new, partial, external) must be mapped, and an implemented one may be
- * mapped to at most one (verification) step.
+ * With a brief, every open requirement (new, partial, external) must be mapped to at least one step.
  */
 export function acceptPlan(
   value: unknown,
@@ -555,17 +666,16 @@ export function acceptPlan(
   if (malformed.length) throw new Error(`Step ids must look like S1, S2, …; got ${malformed.join(", ")}.`);
   if (new Set(ids).size !== ids.length) throw new Error("Step ids must be unique.");
   const known = new Set(ids);
-  // An entry reads "R1, R2 → S1, S2: how it is checked"; ids in the explanation are not part of the mapping.
-  const entries = plan.acceptanceMapping.map((entry) => {
+  // An entry reads "R1, R2 → S1, S2: how it is checked" or "R1 (what it is): S1 and S2". Ids in a parenthesised
+  // label or in the explanation after the steps are not part of the mapping.
+  const entries = plan.acceptanceMapping.map((raw) => {
+    const entry = raw.replace(/\([^)]*\)/g, " ");
     const arrow = entry.search(/→|->/);
-    const head = arrow < 0 ? entry.split(":")[0]! : entry.slice(0, arrow);
-    const tail =
-      arrow < 0
-        ? ""
-        : entry
-            .slice(arrow)
-            .replace(/^(→|->)/, "")
-            .split(":")[0]!;
+    const colon = entry.indexOf(":");
+    const head = arrow >= 0 ? entry.slice(0, arrow) : colon >= 0 ? entry.slice(0, colon) : entry;
+    const tail = (
+      arrow >= 0 ? entry.slice(arrow).replace(/^(→|->)/, "") : colon >= 0 ? entry.slice(colon + 1) : ""
+    ).split(":")[0]!;
     const requirements: string[] = head.match(/\bR[1-9][0-9]{0,2}\b/g) ?? [];
     const steps: string[] = tail.match(/\bS[1-9][0-9]{0,2}\b/g) ?? [];
     return { requirements, steps };
@@ -584,13 +694,6 @@ export function acceptPlan(
   if (unmapped.length)
     throw new Error(
       `acceptanceMapping must map every new, partial or external requirement to steps; missing ${unmapped.join(", ")}. Write entries like "R1 → S1, S2".`,
-    );
-  const overplanned = requirements
-    .filter((r) => r.status === "implemented" && stepsFor(r.id).size > 1)
-    .map((r) => r.id);
-  if (overplanned.length)
-    throw new Error(
-      `${overplanned.join(", ")} ${overplanned.length > 1 ? "are" : "is"} already implemented; map ${overplanned.length > 1 ? "each" : "it"} to at most one verification step.`,
     );
   return plan;
 }

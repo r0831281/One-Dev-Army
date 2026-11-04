@@ -79,6 +79,19 @@ const reply = (content, stop_reason) => ({
   usage,
 });
 const text = (value) => reply([{ type: "text", text: JSON.stringify(value) }], "end_turn");
+// A partial requirement must cite a file the reviewer read in that review.
+const readSale = (id) =>
+  reply(
+    [
+      {
+        type: "tool_use",
+        id,
+        name: "repo_read",
+        input: { path: "addons/sale_custom/models/sale.py", startLine: null, endLine: null },
+      },
+    ],
+    "tool_use",
+  );
 // The task's only part is its description; the review must account for it.
 const requirement = {
   id: "R1",
@@ -89,11 +102,12 @@ const requirement = {
   paths: ["addons/sale_custom/models/sale.py"],
 };
 const script = [
-  // Review 1: reads code, then asks a question.
+  // Review 1: searches and reads the code, then asks a question.
   reply(
     [{ type: "tool_use", id: "t1", name: "repo_search", input: { pattern: "SaleOrder", pathGlob: null } }],
     "tool_use",
   ),
+  readSale("t2"),
   text({
     requirements: [requirement],
     noAction: [],
@@ -103,7 +117,8 @@ const script = [
     proposedAssumptions: [],
     relevantPaths: ["addons/sale_custom/models/sale.py"],
   }),
-  // Review 2 after the human answers: sufficient.
+  // Review 2 after the human answers: reads the code again (a new step), then sufficient.
+  readSale("t3"),
   text({
     requirements: [requirement],
     noAction: [],
@@ -137,7 +152,7 @@ const modelTurn = async (input) => {
 };
 const sufficientReview = () =>
   text({
-    requirements: [requirement],
+    requirements: [{ ...requirement, status: "new", evidence: "No discount rule exists yet.", paths: [] }],
     noAction: [],
     findings: [],
     sufficient: true,
@@ -342,8 +357,8 @@ try {
     "SELECT count(*)::int AS calls, sum(amount_microusd)::int AS micro, count(*) FILTER (WHERE step_id IS NULL)::int AS unattributed FROM model_usage WHERE run_id=$1",
     [started.runId],
   );
-  // 5 scripted calls × (1200 × $4 + 300 × $20) / MTok = 5 × 10 800 micro-USD.
-  assert.deepEqual(cost.rows[0], { calls: 5, micro: 54_000, unattributed: 0 });
+  // 7 scripted calls × (1200 × $4 + 300 × $20) / MTok = 7 × 10 800 micro-USD.
+  assert.deepEqual(cost.rows[0], { calls: 7, micro: 75_600, unattributed: 0 });
 
   // A step whose activity fails outside the agent loop opens the recovery gate; approving retries it.
   crashNextReader = true;

@@ -437,16 +437,20 @@ otherwise). The API builds the v3 manifest itself. Then:
      `unverified` or `external`.
    - **Decide:** it judges the context sufficient only when it has no questions left.
 
-   `acceptClarification` enforces this. It rejects the review, so the model gets a repair turn, when:
-   - a message, image or the description is neither a requirement's source nor listed as asking for nothing;
+   `acceptClarification` enforces this. It rejects the review, so the model gets a repair turn, when any of the
+   following holds. All problems are reported in one rejection, so a single repair turn can fix them:
+   - a message, image or the description is neither a requirement's source nor listed as asking for nothing (the
+     title may be cited too, but need not be);
    - a requirement is left unchecked although the repository is available;
-   - an `implemented` or `partial` requirement cites no existing file;
+   - an `implemented` or `partial` requirement cites no existing file, or the reviewer did not look at the code of
+     any of its cited files (or folders) in that review: a `repo_read` of it, or a `repo_search` hit in it;
    - the review says sufficient but still asks questions.
 
    The accepted review is handed to the planner as a `CONTEXT BRIEF`, assumptions included. The planner plans only
    `new`, `partial` and `external` requirements (an `external` one as operational steps: where, what to set or
-   install, how to check it), and `acceptPlan` rejects a plan whose `acceptanceMapping` does not name each one. An
-   `implemented` requirement gets at most one verification step. The plan gate shows the brief.
+   install, how to check it), and `acceptPlan` rejects a plan whose `acceptanceMapping` does not name each one. The
+   planner is told to give an `implemented` requirement at most one verification step, but that is not enforced.
+   The plan gate shows the brief.
    If the reviewer has questions, a **clarification gate** opens:
    - **Send answers:** the review runs again with your answers.
    - **Accept assumptions:** the proposed assumptions are adopted and the run moves on to planning.
@@ -461,10 +465,15 @@ otherwise). The API builds the v3 manifest itself. Then:
    and its reservations released). Retry runs the failed step again; cancel ends the run.
 
    **Repair turns.** When an answer fails validation, the reason is sent back to the model and recorded in the
-   step's `projection.detail.repairs` (`agent_steps`), so you can see which check needed the extra calls.
+   step's `projection.detail.repairs` (`agent_steps`), with a shortened copy of the rejected answer (`answer`, strings
+   cut to 200 characters), so you can see which check needed the extra calls. A contract rejection names the failing
+   field and rule. Cited sources are normalised before any check: lists and ranges such as `image 4, image 5`,
+   `images 1-3` or `M5-M6, M11` count as the individual parts, and case and plurals do not matter.
 
    **Plan checks.** Step ids must be unique and look like `S1`, `S2`, …; `acceptanceMapping` may only name existing
-   steps, and an `implemented` requirement may be mapped to at most one step.
+   steps, and every `new`, `partial` or `external` requirement must map to at least one. Entries may read
+   `R1 → S1, S2: how it is checked` or `R1 (label): S1 en S2`; ids in a parenthesised label or in the explanation
+   are ignored.
 
    **Cancelling** a run while a step is running aborts the model call in flight. The step learns of it at its next
    heartbeat (about 30 s in the verifier), is marked `CANCELLED` and releases its reservations; no further call starts. Runs
