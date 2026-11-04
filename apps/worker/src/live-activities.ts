@@ -115,6 +115,7 @@ const ROLE_GUIDANCE: Record<LiveRole, { practices: string[]; style: string[]; to
     ],
     tools: [
       "Use repo_list and repo_search to find relevant addons, then repo_read the specific files. Search for the labels, fields and texts that appear in the task and its images.",
+      "Submodule folders are readable like any other folder, at the commit the repository pins; repo_history on a submodule path lists that submodule's own commits. Only a submodule listed as not available cannot be read.",
     ],
   },
   planner: {
@@ -214,6 +215,8 @@ export function createLiveActivities(pool: Pool, deps: LiveDependencies): LiveAc
     const pricingSnapshotId = await pricingSnapshot(pricing);
     const stepId = stepIdFor(input.runId, input.role, input.iteration);
     let revision = 0;
+    // Why answers failed validation, so repair turns can be explained and the checks tuned.
+    const repairs: Array<{ call: number; reason: string }> = [];
     const project = (
       state: "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED",
       detail: Record<string, unknown>,
@@ -226,7 +229,12 @@ export function createLiveActivities(pool: Pool, deps: LiveDependencies): LiveAc
         iteration: input.iteration,
         state,
         stateRevision: ++revision,
-        detail: { agentName: profile.name, model: profile.model, ...detail },
+        detail: {
+          agentName: profile.name,
+          model: profile.model,
+          ...detail,
+          ...(repairs.length ? { repairs } : {}),
+        },
       });
     await project("RUNNING", {});
 
@@ -358,6 +366,9 @@ export function createLiveActivities(pool: Pool, deps: LiveDependencies): LiveAc
           },
           heartbeat(detail) {
             activity.heartbeat({ stepId, ...detail });
+          },
+          async onRepair(call, reason) {
+            repairs.push({ call, reason: reason.slice(0, 1_000) });
           },
         },
       });

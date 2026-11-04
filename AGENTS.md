@@ -422,7 +422,8 @@ other four roles (implementer, tester, reviewer, reporter) still run the determi
 implementation needs a real sandbox, which is not built yet.
 
 **Starting a run.** Click **Analyse with agents** on a task, or call `POST /api/v1/tasks/<taskId>/analyse` with an
-optional `idempotency-key` header. The API builds the v3 manifest itself. Then:
+optional `idempotency-key` header. Like every idempotency key, it must be a UUID (`IDEMPOTENCY_KEY_INVALID`
+otherwise). The API builds the v3 manifest itself. Then:
 
 1. **Context review.** This is the quality gate before planning. The context reviewer works in three phases:
    - **Gather:** it reads the description, every discussion message (labelled `M1`, `M2`, …) and every image, and
@@ -459,6 +460,9 @@ optional `idempotency-key` header. The API builds the v3 manifest itself. Then:
    and a step whose activity crashed or timed out (`STEP_FAILED`, `STEP_TIMED_OUT`; the step is then marked failed
    and its reservations released). Retry runs the failed step again; cancel ends the run.
 
+   **Repair turns.** When an answer fails validation, the reason is sent back to the model and recorded in the
+   step's `projection.detail.repairs` (`agent_steps`), so you can see which check needed the extra calls.
+
    **Plan checks.** Step ids must be unique and look like `S1`, `S2`, …; `acceptanceMapping` may only name existing
    steps, and an `implemented` requirement may be mapped to at most one step.
 
@@ -481,7 +485,10 @@ optional `idempotency-key` header. The API builds the v3 manifest itself. Then:
   branch (default: the local `staging` branch) and the database copy.
 - **Repository access.** Agents read the chosen branch through `git show`, `git grep`, `git ls-tree` and `git log`
   (tools `repo_read`, `repo_search`, `repo_list` and `repo_history`, in `packages/sandboxes/src/repo-read.ts`), at the
-  commit pinned when the run starts. `repo_history` returns at most 50 commits up to the pinned commit. The working tree is never touched. Without an environment, the run uses the
+  commit pinned when the run starts. `repo_history` returns at most 50 commits up to the pinned commit. Git
+  submodules are read too, from their own repository at the commit the parent pins (`repo_history` on a submodule
+  path lists that submodule's commits). A submodule that is not checked out or lacks that commit is listed as
+  `[SUBMODULE NOT AVAILABLE]`, and reading inside it fails with `REPO_SUBMODULE_UNAVAILABLE`. The working tree is never touched. Without an environment, the run uses the
   task text only.
 - **Data access.** Off by default; tick **Let agents query this database** to turn it on for one run. The agents then
   get `db_query` (`packages/sandboxes/src/db-read.ts`):

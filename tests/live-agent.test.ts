@@ -190,10 +190,22 @@ test("invalid output gets a repair turn; a second failure stops with AGENT_OUTPU
   assert.match(String(repaired.inputs[1]!.messages.at(-1)!.content), /missing\.py/);
 
   const failing = scripted([bad, bad]);
+  const reasons: Array<[number, string]> = [];
   await assert.rejects(
-    runAgent({ ...base, modelTurn: failing.turn, accept: (value) => acceptClarification(value, reader) }),
+    runAgent({
+      ...base,
+      modelTurn: failing.turn,
+      hooks: { ...hooks, onRepair: async (call, reason) => void reasons.push([call, reason]) },
+      accept: (value) => acceptClarification(value, reader),
+    }),
     (error: unknown) => error instanceof AgentFailure && error.code === "AGENT_OUTPUT_INVALID",
   );
+  assert.deepEqual(
+    reasons.map(([call]) => call),
+    [0, 1],
+    "both the repaired and the final rejection are reported",
+  );
+  assert.match(reasons[0]![1], /relevantPaths contains "missing\.py"/);
 });
 
 test("refusal, truncation and the call limit stop the agent with explicit codes", async () => {

@@ -510,7 +510,7 @@ export function createLocalApi(options: ApiOptions) {
       if (options.runControl) {
         const startMatch = url.pathname.match(/^\/api\/v1\/tasks\/([^/]+)\/runs$/);
         if (request.method === "POST" && startMatch) {
-          const idempotencyKey = requiredHeader(request, "idempotency-key");
+          const idempotencyKey = idempotencyKeyHeader(request, true);
           const body = await jsonBody<{
             manifest: unknown;
             context: unknown;
@@ -556,6 +556,8 @@ export function createLocalApi(options: ApiOptions) {
           }
           if (request.method !== "POST" || analyseMatch[2])
             return json(response, 405, apiError("METHOD_NOT_ALLOWED", "Method not allowed", requestId));
+          // Checked before anything changes: re-pinning the task and the horizon override come next.
+          const startKey = idempotencyKeyHeader(request, false);
           const body = await jsonBody<{
             environment?: string;
             branch?: string;
@@ -615,11 +617,12 @@ export function createLocalApi(options: ApiOptions) {
             profileRevisions,
             workflowVersion: 3,
           });
-          const key = request.headers["idempotency-key"];
-          const result = await options.runControl.requestStart(
-            typeof key === "string" && key ? key : randomUUID(),
-            { manifest, context, repositoryRoot, ...(dataSource ? { dataSource } : {}) },
-          );
+          const result = await options.runControl.requestStart(startKey, {
+            manifest,
+            context,
+            repositoryRoot,
+            ...(dataSource ? { dataSource } : {}),
+          });
           return json(response, 202, {
             ...result,
             repositoryMapped: Boolean(repositoryRoot),
@@ -645,7 +648,7 @@ export function createLocalApi(options: ApiOptions) {
           return json(response, 200, await options.runControl.decisionByKey(decisionLookup[1]!));
         const cancelMatch = url.pathname.match(/^\/api\/v1\/runs\/([^/]+)\/cancel$/);
         if (request.method === "POST" && cancelMatch) {
-          const idempotencyKey = requiredHeader(request, "idempotency-key");
+          const idempotencyKey = idempotencyKeyHeader(request, true);
           const body = await jsonBody<{ expectedStateRevision: number; reason: string }>(
             request,
             options.maxBodyBytes,
@@ -666,6 +669,17 @@ export function createLocalApi(options: ApiOptions) {
     }
   });
   return { server, sessionToken, csrfToken };
+}
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+/** The idempotency-key header, which must be a UUID; a fresh one when it is optional and absent. */
+function idempotencyKeyHeader(request: IncomingMessage, required: boolean): string {
+  const value = request.headers["idempotency-key"];
+  if (value === undefined || value === "") {
+    if (required) throw new Error("IDEMPOTENCY_KEY_REQUIRED");
+    return randomUUID();
+  }
+  if (typeof value !== "string" || !UUID_PATTERN.test(value)) throw new Error("IDEMPOTENCY_KEY_INVALID");
+  return value.toLowerCase();
 }
 function requiredHeader(request: IncomingMessage, name: string): string {
   const value = request.headers[name];

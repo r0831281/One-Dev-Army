@@ -49,6 +49,8 @@ export interface AgentHooks {
   beforeCall(callIndex: number, inputTokens: number): Promise<void>;
   /** Records the real usage of a finished call. */
   afterCall(callIndex: number, message: Anthropic.Messages.Message): Promise<void>;
+  /** Called when an answer fails validation, with the reason sent back to the model (or the final rejection). */
+  onRepair?(callIndex: number, reason: string): Promise<void>;
   heartbeat(detail: Record<string, unknown>): void;
 }
 
@@ -346,6 +348,7 @@ export async function runAgent<T>(input: AgentRunInput<T>): Promise<{ output: T;
     try {
       return { output: await input.accept(JSON.parse(text)), calls: call + 1 };
     } catch (error) {
+      await input.hooks.onRepair?.(call, (error as Error).message.slice(0, 2000));
       if (repairs >= input.structuredOutputRepairs)
         throw new AgentFailure("AGENT_OUTPUT_INVALID", (error as Error).message.slice(0, 2000));
       repairs++;
