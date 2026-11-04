@@ -43,6 +43,32 @@ export function anthropicModelTurn(client: Pick<Anthropic, "beta">): ModelTurn {
   };
 }
 
+/** Counts the input tokens a turn would send (system, tools, messages and images), without creating a message. */
+export type CountTokens = (
+  input: Pick<ModelTurnInput, "model" | "system" | "messages" | "tools" | "outputSchema" | "signal">,
+) => Promise<number>;
+
+/** Real counter: the free token-count endpoint, so the input limit is checked before a call is paid for. */
+export function anthropicCountTokens(client: Pick<Anthropic, "beta">): CountTokens {
+  return async (input) => {
+    const result = await client.beta.messages.countTokens(
+      {
+        model: input.model,
+        system: input.system,
+        messages: input.messages as Anthropic.Beta.BetaMessageParam[],
+        tools: input.tools as Anthropic.Beta.BetaTool[],
+        thinking: { type: "adaptive" },
+        // The output format adds to the prompt; count it as the real call sends it.
+        ...(input.outputSchema
+          ? { output_config: { format: { type: "json_schema", schema: input.outputSchema } } }
+          : {}),
+      },
+      input.signal ? { signal: input.signal } : {},
+    );
+    return result.input_tokens;
+  };
+}
+
 export function anthropicFinishReason(stopReason: string | null | undefined): GenerateResult["finishReason"] {
   switch (stopReason) {
     case "end_turn":

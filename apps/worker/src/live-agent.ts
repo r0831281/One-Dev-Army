@@ -10,7 +10,7 @@ import {
   type Plan,
   type TaskContext,
 } from "../../../packages/contracts/src/index.js";
-import type { ModelTurn } from "../../../packages/providers/src/anthropic.js";
+import type { CountTokens, ModelTurn } from "../../../packages/providers/src/anthropic.js";
 
 /** Read-only query access to a local database copy (implemented in packages/sandboxes). */
 export interface DbReader {
@@ -31,7 +31,10 @@ export class AgentFailure extends Error {
       | "AGENT_OUTPUT_TRUNCATED"
       | "AGENT_OUTPUT_INVALID"
       | "AGENT_CALL_LIMIT"
-      | "AGENT_NO_OUTPUT",
+      | "AGENT_NO_OUTPUT"
+      | "AGENT_INPUT_LIMIT"
+      | "AGENT_TIME_LIMIT"
+      | "AGENT_CANCELLED",
     readonly detail: string,
   ) {
     super(code);
@@ -39,8 +42,11 @@ export class AgentFailure extends Error {
 }
 
 export interface AgentHooks {
-  /** Called before each model call with its index; reserves budget and may throw to stop the run. */
-  beforeCall(callIndex: number): Promise<void>;
+  /**
+   * Called before each model call with its index and the input tokens it will send; reserves budget and may throw
+   * to stop the run.
+   */
+  beforeCall(callIndex: number, inputTokens: number): Promise<void>;
   /** Records the real usage of a finished call. */
   afterCall(callIndex: number, message: Anthropic.Messages.Message): Promise<void>;
   heartbeat(detail: Record<string, unknown>): void;
@@ -50,8 +56,14 @@ export interface AgentRunInput<T> {
   model: string;
   effort: "low" | "medium" | "high" | "xhigh" | "max";
   maxOutputTokens: number;
+  /** Upper bound on the input of every call; older tool results are trimmed to stay under it. */
+  maxInputTokens: number;
   timeoutMs: number;
   maxModelCalls: number;
+  /** Epoch ms by which the whole loop must be done; a call that cannot finish in time is not started. */
+  deadline?: number;
+  /** Aborts the running call and stops the loop (run cancelled or activity timed out). */
+  signal?: AbortSignal;
   structuredOutputRepairs: number;
   system: string;
   task: string;
@@ -65,6 +77,8 @@ export interface AgentRunInput<T> {
   /** Parses the model's JSON into the contract type; throws with a message the model can act on. */
   accept(value: unknown): Promise<T>;
   modelTurn: ModelTurn;
+  /** Exact input count; without it the loop uses a conservative estimate (tests and offline verifiers). */
+  countTokens?: CountTokens;
   hooks: AgentHooks;
 }
 
@@ -183,9 +197,75 @@ const finalText = (message: Anthropic.Messages.Message) =>
     .join("")
     .trim();
 
-/** Runs one agent to a validated structured result, within the profile's call and repair limits. */
+/** Shortest time worth starting a call for; below it the step stops with AGENT_TIME_LIMIT instead. */
+export const MIN_CALL_MS = 30_000;
+const TRIMMED =
+  "[TRIMMED: an older tool result was removed to stay within the input limit; call the tool again if you still need it]";
+/** Rough upper bound for one image block when no exact count is available. */
+const IMAGE_TOKEN_ESTIMATE = 5_000;
+
+/** Conservative token estimate (3 characters per token, fixed cost per image) for runs without a counter. */
+export function estimateInputTokens(
+  system: string,
+  messages: Anthropic.MessageParam[],
+  tools: Anthropic.Tool[],
+): number {
+  let chars = system.length + JSON.stringify(tools).length;
+  let images = 0;
+  const visit = (block: unknown) => {
+    const value = block as { type?: string; content?: unknown };
+    if (value.type === "image") images++;
+    else if (value.type === "tool_result" && Array.isArray(value.content)) value.content.forEach(visit);
+    else chars += JSON.stringify(block).length;
+  };
+  for (const message of messages)
+    if (typeof message.content === "string") chars += message.content.length;
+    else message.content.forEach(visit);
+  return Math.ceil(chars / 3) + images * IMAGE_TOKEN_ESTIMATE;
+}
+
+/**
+ * Replaces the oldest half of the untrimmed tool results with a short note, never touching the latest message
+ * (the results the model is about to read). Returns false when nothing is left to trim.
+ */
+export function trimToolResults(messages: Anthropic.MessageParam[]): boolean {
+  const trimmable = messages
+    .slice(0, -1)
+    .flatMap((message) =>
+      message.role === "user" && Array.isArray(message.content)
+        ? message.content.filter(
+            (block): block is Anthropic.ToolResultBlockParam =>
+              block.type === "tool_result" && block.content !== TRIMMED,
+          )
+        : [],
+    );
+  if (!trimmable.length) return false;
+  for (const block of trimmable.slice(0, Math.ceil(trimmable.length / 2))) block.content = TRIMMED;
+  return true;
+}
+
+/** Runs one agent to a validated structured result, within the profile's call, input, time and repair limits. */
 export async function runAgent<T>(input: AgentRunInput<T>): Promise<{ output: T; calls: number }> {
   const tools = toolsFor(input.tools, input.reader, input.db ?? null);
+  const estimate = () => estimateInputTokens(input.system, messages, tools);
+  // A counting outage must not block analysis: fall back to the conservative estimate.
+  const count = async () => {
+    if (!input.countTokens) return estimate();
+    try {
+      return await input.countTokens({
+        model: input.model,
+        system: input.system,
+        messages,
+        tools,
+        outputSchema: input.outputSchema,
+        ...(input.signal ? { signal: input.signal } : {}),
+      });
+    } catch {
+      if (input.signal?.aborted) throw cancelled();
+      return estimate();
+    }
+  };
+  const cancelled = () => new AgentFailure("AGENT_CANCELLED", "The run was cancelled or the step timed out.");
   const messages: Anthropic.MessageParam[] = [
     {
       role: "user",
@@ -202,17 +282,35 @@ export async function runAgent<T>(input: AgentRunInput<T>): Promise<{ output: T;
   ];
   let repairs = 0;
   for (let call = 0; call < input.maxModelCalls; call++) {
-    await input.hooks.beforeCall(call);
-    const message = await input.modelTurn({
-      model: input.model,
-      system: input.system,
-      messages,
-      tools,
-      effort: input.effort,
-      maxTokens: input.maxOutputTokens,
-      outputSchema: input.outputSchema,
-      timeoutMs: input.timeoutMs,
-    });
+    if (input.signal?.aborted) throw cancelled();
+    const remaining = input.deadline === undefined ? Infinity : input.deadline - Date.now();
+    if (remaining < MIN_CALL_MS)
+      throw new AgentFailure("AGENT_TIME_LIMIT", `The step ran out of time after ${call} model calls.`);
+    let inputTokens = await count();
+    while (inputTokens > input.maxInputTokens && trimToolResults(messages)) inputTokens = await count();
+    if (inputTokens > input.maxInputTokens)
+      throw new AgentFailure(
+        "AGENT_INPUT_LIMIT",
+        `The next call needs ${inputTokens} input tokens; maxInputTokens is ${input.maxInputTokens}. Raise it in the agent profile.`,
+      );
+    await input.hooks.beforeCall(call, inputTokens);
+    let message: Anthropic.Messages.Message;
+    try {
+      message = await input.modelTurn({
+        model: input.model,
+        system: input.system,
+        messages,
+        tools,
+        effort: input.effort,
+        maxTokens: input.maxOutputTokens,
+        outputSchema: input.outputSchema,
+        timeoutMs: Math.min(input.timeoutMs, remaining),
+        ...(input.signal ? { signal: input.signal } : {}),
+      });
+    } catch (error) {
+      if (input.signal?.aborted) throw cancelled();
+      throw error;
+    }
     await input.hooks.afterCall(call, message);
     input.hooks.heartbeat({ call, stopReason: message.stop_reason });
     if (message.stop_reason === "refusal")
@@ -356,9 +454,16 @@ export async function acceptClarification(
   sources: string[] | null = null,
 ): Promise<Clarification> {
   const clarification = validateClarification({ schemaVersion: "1.0", ...(value as object) });
+  // A cited path may be a file or a directory (an addon, a views folder).
   const exists = async (path: string, field: string) => {
     try {
       await reader!.read(path, 1, 1);
+      return;
+    } catch {
+      // Not a readable file; try it as a directory.
+    }
+    try {
+      await reader!.list(path.replace(/\/+$/, ""));
     } catch {
       throw new Error(`${field} contains "${path}", which does not exist at the base commit.`);
     }
@@ -430,7 +535,11 @@ export function renderBrief(brief: Clarification | null): string {
   ].join("\n");
 }
 
-/** Validates a plan; with a brief, every open requirement (new, partial, external) must appear in the mapping. */
+/**
+ * Validates a plan. Step ids must be unique (S1, S2, …) and the acceptance mapping may only name existing steps.
+ * With a brief, every open requirement (new, partial, external) must be mapped, and an implemented one may be
+ * mapped to at most one (verification) step.
+ */
 export function acceptPlan(
   value: unknown,
   revision: number,
@@ -438,12 +547,47 @@ export function acceptPlan(
   brief: Clarification | null = null,
 ): Plan {
   const plan = validatePlan({ schemaVersion: "1.0", revision, constraints, ...(value as object) });
-  const open = (brief?.requirements ?? []).filter((r) => ["new", "partial", "external"].includes(r.status));
-  const mapping = plan.acceptanceMapping.join("\n");
-  const unmapped = open.filter((r) => !new RegExp(`\\b${r.id}\\b`).test(mapping));
+  const ids = plan.steps.map((step) => step.id);
+  const malformed = ids.filter((id) => !/^S[1-9][0-9]{0,2}$/.test(id));
+  if (malformed.length) throw new Error(`Step ids must look like S1, S2, …; got ${malformed.join(", ")}.`);
+  if (new Set(ids).size !== ids.length) throw new Error("Step ids must be unique.");
+  const known = new Set(ids);
+  // An entry reads "R1, R2 → S1, S2: how it is checked"; ids in the explanation are not part of the mapping.
+  const entries = plan.acceptanceMapping.map((entry) => {
+    const arrow = entry.search(/→|->/);
+    const head = arrow < 0 ? entry.split(":")[0]! : entry.slice(0, arrow);
+    const tail =
+      arrow < 0
+        ? ""
+        : entry
+            .slice(arrow)
+            .replace(/^(→|->)/, "")
+            .split(":")[0]!;
+    const requirements: string[] = head.match(/\bR[1-9][0-9]{0,2}\b/g) ?? [];
+    const steps: string[] = tail.match(/\bS[1-9][0-9]{0,2}\b/g) ?? [];
+    return { requirements, steps };
+  });
+  const unknown = [...new Set(entries.flatMap((entry) => entry.steps))].filter((id) => !known.has(id));
+  if (unknown.length)
+    throw new Error(
+      `acceptanceMapping names steps that do not exist: ${unknown.join(", ")}. Use only: ${ids.join(", ")}.`,
+    );
+  const requirements = brief?.requirements ?? [];
+  const stepsFor = (id: string) =>
+    new Set(entries.filter((entry) => entry.requirements.includes(id)).flatMap((entry) => entry.steps));
+  const unmapped = requirements
+    .filter((r) => ["new", "partial", "external"].includes(r.status) && !stepsFor(r.id).size)
+    .map((r) => r.id);
   if (unmapped.length)
     throw new Error(
-      `acceptanceMapping must map every new, partial or external requirement to steps; missing ${unmapped.map((r) => r.id).join(", ")}. Write entries like "R1 → S1, S2".`,
+      `acceptanceMapping must map every new, partial or external requirement to steps; missing ${unmapped.join(", ")}. Write entries like "R1 → S1, S2".`,
+    );
+  const overplanned = requirements
+    .filter((r) => r.status === "implemented" && stepsFor(r.id).size > 1)
+    .map((r) => r.id);
+  if (overplanned.length)
+    throw new Error(
+      `${overplanned.join(", ")} ${overplanned.length > 1 ? "are" : "is"} already implemented; map ${overplanned.length > 1 ? "each" : "it"} to at most one verification step.`,
     );
   return plan;
 }

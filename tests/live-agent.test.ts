@@ -63,7 +63,8 @@ const reader: RepoReader = {
   async search() {
     return { untrusted: true, content: "addons/sale_custom/models/sale.py:1:class SaleOrder" };
   },
-  async list() {
+  async list(dir) {
+    if (dir && !"addons/sale_custom/models/sale.py".startsWith(`${dir}/`)) throw new Error("REPO_NOT_FOUND");
     return { untrusted: true, content: "addons/sale_custom/models/sale.py" };
   },
 };
@@ -81,6 +82,7 @@ const base = {
   model: "claude-opus-5-5",
   effort: "medium" as const,
   maxOutputTokens: 4000,
+  maxInputTokens: 50_000,
   timeoutMs: 60_000,
   maxModelCalls: 6,
   structuredOutputRepairs: 1,
@@ -228,7 +230,7 @@ test("plans are validated against the contract with the run's constraints", () =
   const plan = acceptPlan(
     {
       title: "Fix totals",
-      steps: [{ id: "step-1", title: "Patch", description: "Change compute", tests: ["Unit test"] }],
+      steps: [{ id: "S1", title: "Patch", description: "Change compute", tests: ["Unit test"] }],
       acceptanceMapping: [],
       risks: [],
     },
@@ -478,6 +480,14 @@ test("the context gate rejects reviews that skip a task part or guess the code s
   assert.doesNotThrow(() =>
     acceptPlan({ ...plan, acceptanceMapping: ["R1 → S1", "R2 → S1"] }, 1, [], accepted),
   );
+  // Cited folders count as existing paths.
+  assert.ok(
+    await acceptClarification(
+      { ...complete, requirements: [requirement({ sources, paths: ["addons/sale_custom/", "addons"] })] },
+      reader,
+      sources,
+    ),
+  );
   const brief = renderBrief(accepted);
   assert.match(brief, /^CONTEXT BRIEF/);
   assert.match(brief, /- R2 \[new\] Round the unit price\n  sources: M1/);
@@ -498,4 +508,145 @@ test("context sources list the description, each message and each image", () => 
     },
   } as never;
   assert.deepEqual(contextSources(context, [{} as never]), ["description", "M1", "M2", "image 1"]);
+});
+
+test("plan step ids are unique and the mapping names only existing steps", () => {
+  const step = (id: string) => ({ id, title: "t", description: "d", tests: [] });
+  const plan = (steps: string[], acceptanceMapping: string[]) =>
+    acceptPlan({ title: "P", steps: steps.map(step), acceptanceMapping, risks: [] }, 1, []);
+  assert.throws(() => plan(["S1", "S1"], []), /unique/);
+  assert.throws(() => plan(["step-1"], []), /look like S1/);
+  assert.throws(() => plan(["S1"], ["R1 → S1, S9"]), /do not exist: S9/);
+  assert.doesNotThrow(() => plan(["S1", "S2"], ["R1 → S1, S2: totals match"]));
+  const brief = {
+    schemaVersion: "1.0",
+    sufficient: true,
+    questions: [],
+    proposedAssumptions: [],
+    relevantPaths: [],
+    requirements: [
+      {
+        id: "R1",
+        text: "a",
+        sources: ["description"],
+        status: "implemented",
+        evidence: "e",
+        paths: ["x.py"],
+      },
+      { id: "R2", text: "b", sources: ["description"], status: "new", evidence: "e", paths: [] },
+    ],
+  } as never;
+  const mapped = (acceptanceMapping: string[]) =>
+    acceptPlan({ title: "P", steps: ["S1", "S2"].map(step), acceptanceMapping, risks: [] }, 1, [], brief);
+  assert.throws(() => mapped(["R1 → S1, S2", "R2 → S2"]), /R1 is already implemented/);
+  assert.throws(() => mapped(["R2: nothing to do"]), /missing R2/, "a requirement needs at least one step");
+  assert.doesNotThrow(() => mapped(["R1 → S1: check on staging", "R2 → S2"]));
+  // Ids in the explanation are not part of the mapping.
+  assert.doesNotThrow(() =>
+    mapped(["R1 → S1", "R2 → S2: reuses R1's compute, compare with the S10 invoice"]),
+  );
+});
+
+test("cancellation stops the loop and aborts the running call", async () => {
+  const controller = new AbortController();
+  const seen: Array<AbortSignal | undefined> = [];
+  await assert.rejects(
+    runAgent({
+      ...base,
+      signal: controller.signal,
+      modelTurn: async (input) => {
+        seen.push(input.signal);
+        controller.abort();
+        throw new Error("Request was aborted.");
+      },
+      accept: (value) => acceptClarification(value, reader),
+    }),
+    (error: unknown) => error instanceof AgentFailure && error.code === "AGENT_CANCELLED",
+  );
+  assert.equal(seen[0], controller.signal, "the signal reaches the transport");
+  const { turn, inputs } = scripted([]);
+  await assert.rejects(
+    runAgent({ ...base, signal: controller.signal, modelTurn: turn, accept: async (v) => v }),
+    (error: unknown) => error instanceof AgentFailure && error.code === "AGENT_CANCELLED",
+  );
+  assert.equal(inputs.length, 0, "no call starts after cancellation");
+});
+
+test("a call that cannot finish before the step deadline is not started", async () => {
+  const { turn, inputs } = scripted([]);
+  await assert.rejects(
+    runAgent({ ...base, deadline: Date.now() + 10_000, modelTurn: turn, accept: async (v) => v }),
+    (error: unknown) => error instanceof AgentFailure && error.code === "AGENT_TIME_LIMIT",
+  );
+  assert.equal(inputs.length, 0);
+  const timed = scripted([message([{ type: "text", text: "{}" }], "end_turn")]);
+  await runAgent({ ...base, deadline: Date.now() + 45_000, modelTurn: timed.turn, accept: async (v) => v });
+  assert.ok(timed.inputs[0]!.timeoutMs <= 45_000, "the call timeout is cut to the time left");
+});
+
+test("the input limit trims old tool results, then fails before an oversized call", async () => {
+  const big = "x".repeat(30_000);
+  const bigReader: RepoReader = { ...reader, search: async () => ({ untrusted: true, content: big }) };
+  const searching = () =>
+    message(
+      [
+        {
+          type: "tool_use",
+          id: `t${Math.random()}`,
+          name: "repo_search",
+          input: { pattern: "a", pathGlob: null },
+        },
+      ],
+      "tool_use",
+    );
+  const reserved: number[] = [];
+  const { turn, inputs } = scripted([
+    searching(),
+    searching(),
+    searching(),
+    message([{ type: "text", text: "{}" }], "end_turn"),
+  ]);
+  await runAgent({
+    ...base,
+    reader: bigReader,
+    maxInputTokens: 25_000,
+    modelTurn: turn,
+    hooks: { ...hooks, beforeCall: async (_call, tokens) => void reserved.push(tokens) },
+    accept: async (v) => v,
+  });
+  assert.equal(inputs.length, 4);
+  assert.ok(
+    reserved.every((tokens) => tokens <= 25_000),
+    "every call stays within the limit",
+  );
+  const last = JSON.stringify(inputs[3]!.messages);
+  assert.match(last, /TRIMMED/, "older results were trimmed");
+  assert.ok(last.includes(big), "the latest result is kept whole");
+
+  const counted: number[] = [];
+  await assert.rejects(
+    runAgent({
+      ...base,
+      maxInputTokens: 1_000,
+      countTokens: async () => {
+        counted.push(1);
+        return 5_000;
+      },
+      modelTurn: scripted([]).turn,
+      accept: async (v) => v,
+    }),
+    (error: unknown) => error instanceof AgentFailure && error.code === "AGENT_INPUT_LIMIT",
+  );
+  assert.equal(counted.length, 1, "the exact counter is used when present");
+
+  const fallback = scripted([message([{ type: "text", text: "{}" }], "end_turn")]);
+  await runAgent({
+    ...base,
+    countTokens: async () => {
+      throw new Error("count endpoint unavailable");
+    },
+    modelTurn: fallback.turn,
+    accept: async (v) => v,
+  });
+  assert.equal(fallback.inputs.length, 1, "a failing counter falls back to the estimate");
 });

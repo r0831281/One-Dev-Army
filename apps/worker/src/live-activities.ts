@@ -28,6 +28,7 @@ import {
   anthropicUsage,
   costMicrousd,
   worstCaseMicrousd,
+  type CountTokens,
   type ModelPricing,
   type ModelTurn,
 } from "../../../packages/providers/src/anthropic.js";
@@ -65,12 +66,26 @@ export interface LiveStepInput {
 export type LiveStepResult<T> =
   | { ok: true; output: T; artifactHash: string; calls: number; costMicrousd: number | null }
   | { ok: false; code: string; detail: string };
+/** Identifies a live step the workflow gave up on (its activity crashed or timed out). */
+export interface AbandonStepInput {
+  workspaceId: string;
+  runId: string;
+  role: LiveRole;
+  binding: { id: string; revision: number };
+  iteration: number;
+  code: string;
+  detail: string;
+}
 export interface LiveActivities {
   analyseContext(input: LiveStepInput): Promise<LiveStepResult<Clarification>>;
   planTask(input: LiveStepInput): Promise<LiveStepResult<Plan>>;
+  /** Marks a step that never reported back as failed and releases its open budget reservations. */
+  abandonStep(input: AbandonStepInput): Promise<void>;
 }
 export interface LiveDependencies {
   modelTurn: ModelTurn;
+  /** Exact input-token counter; without it the step uses a conservative estimate. */
+  countTokens?: CountTokens;
   readerFor(root: string, baseSha: string): Promise<RepoReader | null>;
   /** Opens a read-only query connection; the caller closes it when the step ends. */
   dbFor?(source: {
@@ -157,6 +172,13 @@ async function loadSoul(role: LiveRole, outputSchemaRef: string): Promise<SoulSp
   };
 }
 
+/** Time kept back from the activity's start-to-close timeout so a step can record its result before it expires. */
+const STEP_DEADLINE_MARGIN_MS = 60_000;
+
+const stepIdFor = (runId: string, role: LiveRole, iteration: number) =>
+  uuidFromHash(`step/${runId}/${role}/${iteration}`);
+const operationIdFor = (stepId: string, call: number) => uuidFromHash(`model-call/${stepId}/${call}`);
+
 export function createLiveActivities(pool: Pool, deps: LiveDependencies): LiveActivities {
   const phase3 = new PgPhase3Repository(pool);
   const workflows = new PgWorkflowRepository(pool);
@@ -190,9 +212,12 @@ export function createLiveActivities(pool: Pool, deps: LiveDependencies): LiveAc
     const pricing = ANTHROPIC_PRICING[profile.model];
     if (!pricing) return { ok: false, code: "UNPRICED_MODEL", detail: `No pricing for ${profile.model}` };
     const pricingSnapshotId = await pricingSnapshot(pricing);
-    const stepId = uuidFromHash(`step/${input.runId}/${input.role}/${input.iteration}`);
+    const stepId = stepIdFor(input.runId, input.role, input.iteration);
     let revision = 0;
-    const project = (state: "RUNNING" | "COMPLETED" | "FAILED", detail: Record<string, unknown>) =>
+    const project = (
+      state: "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED",
+      detail: Record<string, unknown>,
+    ) =>
       workflows.projectStep(input.workspaceId, {
         schemaVersion: "1.0",
         stepId,
@@ -255,16 +280,21 @@ export function createLiveActivities(pool: Pool, deps: LiveDependencies): LiveAc
     // Reservations of calls that have not produced usage yet; released if the step fails.
     const openReservations = new Set<string>();
     let priced = true;
-    const operationId = (call: number) => uuidFromHash(`model-call/${stepId}/${call}`);
-    // A single model turn can take minutes; keep the activity alive while it runs.
-    const keepAlive = setInterval(() => Context.current().heartbeat({ stepId, waiting: true }), 30_000);
+    const operationId = (call: number) => operationIdFor(stepId, call);
+    const activity = Context.current();
+    // A single model turn can take minutes; keep the activity alive while it runs. Heartbeats are also how a
+    // cancellation from the workflow reaches this activity.
+    const keepAlive = setInterval(() => activity.heartbeat({ stepId, waiting: true }), 30_000);
     try {
       const result = await runAgent<T>({
         model: profile.model,
         effort: profile.providerOptions.reasoningEffort ?? "high",
         maxOutputTokens: profile.limits.maxOutputTokens,
+        maxInputTokens: profile.limits.maxInputTokens,
         timeoutMs: profile.limits.timeoutMs,
         maxModelCalls: profile.limits.maxModelCalls,
+        deadline: Date.now() + activity.info.startToCloseTimeoutMs - STEP_DEADLINE_MARGIN_MS,
+        signal: activity.cancellationSignal,
         structuredOutputRepairs: profile.retryPolicy.structuredOutputRepairs,
         system: prompt.messages[0]!.content,
         task: prompt.messages[1]!.content,
@@ -279,14 +309,11 @@ export function createLiveActivities(pool: Pool, deps: LiveDependencies): LiveAc
         outputSchema,
         accept: (value) => accept(value, reader, contextSources(input.context, sent)),
         modelTurn: deps.modelTurn,
+        ...(deps.countTokens ? { countTokens: deps.countTokens } : {}),
         hooks: {
-          async beforeCall(call) {
-            // Worst case for one call: full output plus a generous input allowance, priced at list rates.
-            const maxMicrousd = worstCaseMicrousd(
-              pricing,
-              profile.limits.maxInputTokens,
-              profile.limits.maxOutputTokens,
-            );
+          async beforeCall(call, inputTokens) {
+            // Worst case for one call: the counted input (at most maxInputTokens) and full output, at list rates.
+            const maxMicrousd = worstCaseMicrousd(pricing, inputTokens, profile.limits.maxOutputTokens);
             await phase3.reserveUsage({
               operationId: operationId(call),
               runId: input.runId,
@@ -330,7 +357,7 @@ export function createLiveActivities(pool: Pool, deps: LiveDependencies): LiveAc
             await project("RUNNING", { calls: call + 1, costMicrousd: priced ? spent : null });
           },
           heartbeat(detail) {
-            Context.current().heartbeat({ stepId, ...detail });
+            activity.heartbeat({ stepId, ...detail });
           },
         },
       });
@@ -344,8 +371,10 @@ export function createLiveActivities(pool: Pool, deps: LiveDependencies): LiveAc
         costMicrousd: priced ? spent : null,
       };
     } catch (error) {
-      const code =
-        error instanceof AgentFailure
+      // Cancellation can land outside the model call (while counting or reserving); it is still a cancellation.
+      const code = activity.cancellationSignal.aborted
+        ? "AGENT_CANCELLED"
+        : error instanceof AgentFailure
           ? error.code
           : /^[A-Z][A-Z0-9_]{0,80}$/.test((error as Error).message)
             ? (error as Error).message
@@ -354,7 +383,11 @@ export function createLiveActivities(pool: Pool, deps: LiveDependencies): LiveAc
       if (!(error instanceof AgentFailure)) console.error("LIVE_AGENT_FAILED", code, detail);
       // A call that threw recorded no usage; holding its worst-case reservation would block the retry.
       await phase3.releaseUsage([...openReservations]);
-      await project("FAILED", { code, detail, costMicrousd: priced ? spent : null });
+      await project(code === "AGENT_CANCELLED" ? "CANCELLED" : "FAILED", {
+        code,
+        detail,
+        costMicrousd: priced ? spent : null,
+      });
       return { ok: false, code, detail };
     } finally {
       clearInterval(keepAlive);
@@ -362,7 +395,35 @@ export function createLiveActivities(pool: Pool, deps: LiveDependencies): LiveAc
     }
   }
 
+  async function abandonStep(input: AbandonStepInput): Promise<void> {
+    const stepId = stepIdFor(input.runId, input.role, input.iteration);
+    const row = await pool.query<{ state: string; state_revision: string; projection: { detail?: object } }>(
+      "SELECT state,state_revision,projection FROM agent_steps WHERE run_id=$1 AND step_key=$2 AND logical_iteration=$3",
+      [input.runId, input.role, input.iteration],
+    );
+    const step = row.rows[0];
+    const profile = await pool.query<{ profile: AgentProfile }>(
+      "SELECT profile FROM agent_profiles WHERE workspace_id=$1 AND id=$2 AND revision=$3",
+      [input.workspaceId, input.binding.id, input.binding.revision],
+    );
+    // Reservations are keyed by call index; a call that recorded usage is no longer RESERVED and is untouched.
+    const calls = profile.rows[0]?.profile.limits.maxModelCalls ?? 0;
+    await phase3.releaseUsage(Array.from({ length: calls }, (_, call) => operationIdFor(stepId, call)));
+    if (!step || step.state !== "RUNNING") return;
+    await workflows.projectStep(input.workspaceId, {
+      schemaVersion: "1.0",
+      stepId,
+      runId: input.runId,
+      stepKey: input.role,
+      iteration: input.iteration,
+      state: "FAILED",
+      stateRevision: Number(step.state_revision) + 1,
+      detail: { ...step.projection.detail, code: input.code, detail: input.detail },
+    });
+  }
+
   return {
+    abandonStep,
     analyseContext: (input) =>
       step(
         input,

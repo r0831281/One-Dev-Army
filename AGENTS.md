@@ -453,8 +453,18 @@ optional `idempotency-key` header. The API builds the v3 manifest itself. Then:
 2. **Planning.** The planner writes a plan and a **plan gate** opens:
    - **Request changes:** you get a new plan revision.
    - **Approve:** the run ends `COMPLETED` with the approved plan stored.
-3. **Failures.** A refusal, invalid output after the repair turns, a hit call limit or an exhausted budget opens a
-   **recovery gate**. Retry runs the failed step again; cancel ends the run.
+3. **Failures.** These open a **recovery gate**: a refusal (`AGENT_REFUSED`), invalid output after the repair turns
+   (`AGENT_OUTPUT_INVALID`), the call limit (`AGENT_CALL_LIMIT`), the input limit (`AGENT_INPUT_LIMIT`), the step
+   running out of time (`AGENT_TIME_LIMIT`), an exhausted budget (`TASK_BUDGET_EXHAUSTED`, `DAILY_BUDGET_EXHAUSTED`),
+   and a step whose activity crashed or timed out (`STEP_FAILED`, `STEP_TIMED_OUT`; the step is then marked failed
+   and its reservations released). Retry runs the failed step again; cancel ends the run.
+
+   **Plan checks.** Step ids must be unique and look like `S1`, `S2`, …; `acceptanceMapping` may only name existing
+   steps, and an `implemented` requirement may be mapped to at most one step.
+
+   **Cancelling** a run while a step is running aborts the model call in flight. The step learns of it at its next
+   heartbeat (about 30 s in the verifier), is marked `CANCELLED` and releases its reservations; no further call starts. Runs
+   started before this change keep the old behaviour (patch `live-step-cancellation-v1`).
 
 **Work environments.** Environments are discovered by convention; nothing needs registering:
 
@@ -521,14 +531,18 @@ section that also says which chatter message each one was attached to:
   '
   ```
 
-**Cost.** Every call reserves its worst-case cost against **Settings → Spending** before it runs, then records the
-real tokens and USD per step. `unpricedPolicy: "block"` refuses models without a price entry
+**Cost.** Before each call the worker counts its exact input tokens (the free token-count endpoint). Over the
+profile's `maxInputTokens`, the oldest tool results are replaced by a short note until it fits; if it still does not
+fit, the step fails with `AGENT_INPUT_LIMIT`. The call then reserves its worst case (the counted input plus
+`maxOutputTokens`) against **Settings → Spending** and records the real tokens and USD afterwards. A step stops
+starting calls 60 s before its 20-minute activity limit, and each call's timeout is cut to the time left. `unpricedPolicy: "block"` refuses models without a price entry
 (`packages/providers/src/anthropic.ts`).
 
 **Other providers.** Profiles for other providers can be saved, but they still hold runs with `EXECUTION_BACKEND`.
 
-**Test without spending.** `node tools/verify-live-analysis.mjs` drives a v3 run through real Temporal and Postgres
-with a scripted model. It needs `ODA_PRODUCT_DATABASE_URL`.
+**Test without spending.** `node tools/verify-live-analysis.mjs` drives v3 runs through real Temporal and Postgres
+with a scripted model: the gate path, a crashed step reaching the recovery gate, cancelling during a step, and the
+task budget running out during a step. It takes under a minute and needs `ODA_PRODUCT_DATABASE_URL`.
 
 ### Profile shape
 
